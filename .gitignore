@@ -1,0 +1,14 @@
+# Clés / credentials
+*.pem
+*.ppk
+CLEF.txt
+infra_state.env
+
+# Claude
+.claude/
+
+# Scripts annexes non inclus dans ce push
+add_mqtt_1883.sh
+android-app/
+scripts/
+recap.txt

@@ -1,0 +1,4 @@
+# Force LF pour les scripts shell (important pour exécution sur Linux)
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
