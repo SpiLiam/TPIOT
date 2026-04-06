@@ -9,6 +9,11 @@ infra_state.env
 
 # Scripts annexes non inclus dans ce push
 add_mqtt_1883.sh
-android-app/
 scripts/
 recap.txt
+
+# Android build artifacts (garder seulement l'APK final)
+android-app/.gradle/
+android-app/app/build/
+android-app/local.properties
+android-app/app/build/outputs/apk/androidTest/
