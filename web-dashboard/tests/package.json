@@ -1,0 +1,8 @@
+{
+  "name": "iot-tests",
+  "version": "1.0.0",
+  "main": "run_tests.js",
+  "dependencies": {
+    "mqtt": "^5.3.4"
+  }
+}

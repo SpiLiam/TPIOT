@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build: ./app
+    ports:
+      - "3000:3000"
+    environment:
+      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-6134b7971649d60d.elb.us-east-1.amazonaws.com}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_TOPIC=${MQTT_TOPIC:-sensors/temperature}
+    restart: unless-stopped
+
+  tests:
+    build: ./tests
+    environment:
+      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-6134b7971649d60d.elb.us-east-1.amazonaws.com}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_TOPIC=${MQTT_TOPIC:-sensors/temperature}
+    profiles:
+      - tests

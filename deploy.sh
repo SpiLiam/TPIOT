@@ -51,20 +51,17 @@ dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 mkdir -p /var/log/mosquitto /var/lib/mosquitto
 chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
-cat > /etc/mosquitto/conf.d/mqtt-gw.conf << 'MQTTCONF'
-listener 1883
-bind_address 0.0.0.0
-allow_anonymous true
-listener 8883
-allow_anonymous true
-log_type all
-log_dest file /var/log/mosquitto/mosquitto.log
-log_dest stdout
-log_timestamp true
+cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
+pid_file /run/mosquitto/mosquitto.pid
 persistence true
 persistence_location /var/lib/mosquitto/
+log_dest file /var/log/mosquitto/mosquitto.log
+
+listener 1883 0.0.0.0
+allow_anonymous true
 max_connections 500
 MQTTCONF
+rm -f /etc/mosquitto/conf.d/mqtt-gw.conf
 mkdir -p /etc/mosquitto/certs
 openssl req -new -x509 -days 365 -nodes \
   -out /etc/mosquitto/certs/server.crt \
@@ -454,6 +451,13 @@ SUBNET_DMZ=$(aws ec2 create-subnet \
 save "SUBNET_DMZ" "$SUBNET_DMZ"
 log "Subnet DMZ    : $SUBNET_DMZ ($DMZ_CIDR)"
 
+# Auto-assign public IP pour les instances dans le subnet DMZ
+aws ec2 modify-subnet-attribute \
+  --region "$REGION" \
+  --subnet-id "$SUBNET_DMZ" \
+  --map-public-ip-on-launch > /dev/null
+log "Auto-assign public IP active sur subnet DMZ"
+
 SUBNET_PRIVATE=$(aws ec2 create-subnet \
   --region "$REGION" \
   --vpc-id "$VPC_ID" \
@@ -668,14 +672,17 @@ NACL_DMZ=$(aws ec2 create-network-acl \
   --query 'NetworkAcl.NetworkAclId' --output text)
 
 # Inbound DMZ
+create_nacl_rule "$NACL_DMZ" 90  tcp allow ingress 0.0.0.0/0 22 22         # SSH admin
 create_nacl_rule "$NACL_DMZ" 100 tcp allow ingress 0.0.0.0/0 8883 8883   # MQTT TLS public
+create_nacl_rule "$NACL_DMZ" 105 tcp allow ingress 0.0.0.0/0 1883 1883   # MQTT plaintext (Android/demo)
 create_nacl_rule "$NACL_DMZ" 110 tcp allow ingress 0.0.0.0/0 1024 65535  # Ephemeral
 create_nacl_rule "$NACL_DMZ" 120 tcp allow ingress "$PRIVATE_CIDR" 1883 1883  # MQTT depuis prive
 create_nacl_rule "$NACL_DMZ" 130 udp allow ingress "$VPC_CIDR" 4789 4789  # VXLAN mirroring
 create_nacl_rule "$NACL_DMZ" 900 "-1" deny  ingress 0.0.0.0/0 - -        # Deny tout reste
 # Outbound DMZ
 create_nacl_rule "$NACL_DMZ" 100 tcp allow egress 0.0.0.0/0 1024 65535   # Ephemeral
-create_nacl_rule "$NACL_DMZ" 110 tcp allow egress 0.0.0.0/0 443 443       # HTTPS (updates SSM)
+create_nacl_rule "$NACL_DMZ" 110 tcp allow egress 0.0.0.0/0 443 443       # HTTPS (SSM, updates)
+create_nacl_rule "$NACL_DMZ" 115 tcp allow egress 0.0.0.0/0 80 80         # HTTP (apt-get)
 create_nacl_rule "$NACL_DMZ" 120 tcp allow egress "$PRIVATE_CIDR" 1883 1883  # MQTT vers prive
 create_nacl_rule "$NACL_DMZ" 900 "-1" deny  egress 0.0.0.0/0 - -          # Deny tout reste
 
@@ -1046,18 +1053,18 @@ log "Alarmes CloudWatch configurees"
 section "13/14 - MQTT PORT 1883 (DEMO / APP ANDROID)"
 # ════════════════════════════════════════════════════════════
 
-# ── Règle SG GW : ouvrir port 1883 ───────────────────────────────────────────
+# ── Règle SG GW : ouvrir port 1883 depuis internet ───────────────────────────
 EXISTING_1883=$(aws ec2 describe-security-groups \
   --region "$REGION" --group-ids "$SG_MQTT_GW" \
-  --query "SecurityGroups[0].IpPermissions[?FromPort==\`1883\`]" \
+  --query "SecurityGroups[0].IpPermissions[?FromPort==\`1883\`].IpRanges[?CidrIp=='0.0.0.0/0'].CidrIp" \
   --output text 2>/dev/null || true)
 if [[ -z "$EXISTING_1883" ]]; then
   aws ec2 authorize-security-group-ingress \
     --region "$REGION" --group-id "$SG_MQTT_GW" \
     --protocol tcp --port 1883 --cidr 0.0.0.0/0 > /dev/null
-  log "Port 1883 ouvert sur le SG GW ($SG_MQTT_GW)"
+  log "Port 1883 ouvert depuis internet sur le SG GW ($SG_MQTT_GW)"
 else
-  log "Port 1883 deja ouvert sur le SG GW"
+  log "Port 1883 deja ouvert depuis internet sur le SG GW"
 fi
 
 # ── NLB : Target Group port 1883 ─────────────────────────────────────────────
