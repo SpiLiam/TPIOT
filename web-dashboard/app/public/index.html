@@ -16,6 +16,22 @@
   .badge.reconnecting { background: #4a3a1a; color: #fbbf24; }
   .badge.connecting   { background: #1a2a4a; color: #60a5fa; }
   .config-info { margin-left: auto; font-size: 0.75rem; color: #888; }
+  .btn-settings { background: #2a2d3e; border: 1px solid #3a3d4e; color: #aaa; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 0.8rem; }
+  .btn-settings:hover { background: #3a3d4e; color: #fff; }
+
+  /* Modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #1a1d2e; border: 1px solid #2a2d3e; border-radius: 12px; padding: 24px; width: 420px; max-width: 95vw; }
+  .modal h3 { margin-bottom: 20px; font-size: 1rem; }
+  .modal label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 4px; margin-top: 14px; }
+  .modal input { width: 100%; background: #0f1117; border: 1px solid #2a2d3e; color: #e0e0e0; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; }
+  .modal input:focus { outline: none; border-color: #4ade80; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+  .btn-primary { background: #1a4a2e; color: #4ade80; border: 1px solid #4ade80; padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
+  .btn-primary:hover { background: #2a5a3e; }
+  .btn-cancel  { background: transparent; color: #888; border: 1px solid #2a2d3e; padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
+  .btn-cancel:hover { color: #fff; }
 
   .grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; padding: 20px; }
   @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
@@ -58,7 +74,25 @@
   <h1>IoT Dashboard</h1>
   <span id="badge" class="badge connecting">Connexion...</span>
   <span id="config-info" class="config-info"></span>
+  <button class="btn-settings" onclick="openSettings()">⚙ Broker</button>
 </header>
+
+<!-- Modal settings -->
+<div id="modal" class="modal-overlay">
+  <div class="modal">
+    <h3>⚙ Configuration du broker MQTT</h3>
+    <label>Host (DNS ou IP)</label>
+    <input id="s-host" type="text" placeholder="iot-mqtt-nlb-xxx.elb.us-east-1.amazonaws.com">
+    <label>Port</label>
+    <input id="s-port" type="number" placeholder="1883" value="1883">
+    <label>Topic</label>
+    <input id="s-topic" type="text" placeholder="sensors/temperature" value="sensors/temperature">
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeSettings()">Annuler</button>
+      <button class="btn-primary" onclick="applySettings()">Appliquer</button>
+    </div>
+  </div>
+</div>
 
 <div class="grid">
   <!-- Valeur courante -->
@@ -190,6 +224,40 @@ function setBadge(status, error) {
   b.className    = 'badge ' + status;
   if (error) b.title = error;
 }
+
+// ─── Settings modal ──────────────────────────────────────────
+function openSettings() {
+  const s = document.getElementById('modal');
+  fetch('/api/status').then(r => r.json()).then(d => {
+    document.getElementById('s-host').value  = d.host  || '';
+    document.getElementById('s-port').value  = d.port  || 1883;
+    document.getElementById('s-topic').value = d.topic || 'sensors/temperature';
+  });
+  s.classList.add('open');
+}
+function closeSettings() { document.getElementById('modal').classList.remove('open'); }
+function applySettings() {
+  const host  = document.getElementById('s-host').value.trim();
+  const port  = parseInt(document.getElementById('s-port').value) || 1883;
+  const topic = document.getElementById('s-topic').value.trim() || 'sensors/temperature';
+  if (!host) { alert('Host requis'); return; }
+  fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host, port, topic })
+  }).then(() => {
+    closeSettings();
+    history = [];
+    updateChart([]);
+    updateHistoryList([]);
+    document.getElementById('temp-value').textContent = '--';
+    document.getElementById('temp-sensor').textContent = '--';
+    document.getElementById('temp-time').textContent = '--';
+  });
+}
+document.getElementById('modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeSettings();
+});
 
 // ─── WebSocket ───────────────────────────────────────────────
 let history = [];

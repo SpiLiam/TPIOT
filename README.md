@@ -280,12 +280,22 @@ Projet Kotlin dans `android-app/` — ouvrir dans Android Studio.
 
 ## Dashboard Web (Docker)
 
+Récupère d'abord le DNS du NLB :
+```bash
+aws elbv2 describe-load-balancers --region us-east-1 \
+  --names "iot-mqtt-nlb" \
+  --query 'LoadBalancers[0].DNSName' \
+  --output text
+```
+
 ```bash
 cd web-dashboard
-cp .env.example .env      # édite MQTT_HOST avec le DNS du NLB
+cp .env.example .env      # édite MQTT_HOST avec le DNS du NLB récupéré ci-dessus
 docker compose up --build
 # Ouvre http://localhost:3000
 ```
+
+Le broker peut aussi être changé **à chaud depuis l'interface** via le bouton **⚙ Broker** en haut à droite — sans redémarrer le container.
 
 Fonctionnalités :
 - Température courante avec code couleur
