@@ -45,6 +45,10 @@ set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
 apt-get install -y mosquitto mosquitto-clients amazon-cloudwatch-agent jq curl wget openssl
+# SSM Agent (non inclus par defaut sur Ubuntu 22.04 Canonical)
+wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 mkdir -p /var/log/mosquitto /var/lib/mosquitto
 chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
 cat > /etc/mosquitto/conf.d/mqtt-gw.conf << 'MQTTCONF'
@@ -102,6 +106,10 @@ set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
 apt-get install -y snort amazon-cloudwatch-agent jq curl libpcap-dev net-tools
+# SSM Agent
+wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 mkdir -p /etc/snort/rules /var/log/snort
 chmod 755 /var/log/snort
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
@@ -164,6 +172,10 @@ set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
 apt-get install -y python3 python3-pip mosquitto mosquitto-clients amazon-cloudwatch-agent jq curl
+# SSM Agent
+wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 pip3 install paho-mqtt
 mkdir -p /var/log/mosquitto
 chown mosquitto:mosquitto /var/log/mosquitto
