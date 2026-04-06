@@ -326,10 +326,118 @@ docker compose --profile tests run --rm tests
 aws ssm start-session --target <instance-id> --region us-east-1
 ```
 
-## Vérifier le simulateur
+---
+
+## Debug & Troubleshooting
+
+### Récupérer les IPs et DNS actuels
 
 ```bash
-# Vérifier le service sur l'instance ingestion
-systemctl status iot-simulator
-journalctl -u iot-simulator -f
+# DNS du NLB
+aws elbv2 describe-load-balancers --region us-east-1 --names "iot-mqtt-nlb" \
+  --query 'LoadBalancers[0].DNSName' --output text
+
+# IPs publiques des GW (changent à chaque reboot)
+aws ec2 describe-instances --region us-east-1 \
+  --filters "Name=tag:Name,Values=iot-mqtt-mqtt-gw1,iot-mqtt-mqtt-gw2" \
+  --query 'Reservations[*].Instances[*].{Name:Tags[?Key==`Name`].Value|[0],PublicIP:PublicIpAddress,State:State.Name}' \
+  --output table
+```
+
+### Vérifier la santé du NLB
+
+```bash
+TG=$(aws elbv2 describe-target-groups --names "iot-mqtt-tg-mqtt-1883" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text --region us-east-1)
+aws elbv2 describe-target-health --target-group-arn "$TG" --region us-east-1 \
+  --query 'TargetHealthDescriptions[*].{ID:Target.Id,State:TargetHealth.State}' --output table
+```
+
+→ Si `unhealthy` : Mosquitto ne répond pas sur le port 1883 (voir section Mosquitto ci-dessous)
+
+### Vérifier / relancer Mosquitto sur une GW
+
+```bash
+# Remplace GW_IP par l'IP publique de la GW
+chmod 400 ~/labsuser.pem
+ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo systemctl status mosquitto --no-pager | head -8; sudo ss -tlnp | grep 1883"
+
+# Si arrêté, relancer :
+ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo systemctl start mosquitto"
+```
+
+Si Mosquitto refuse de démarrer (erreur config) :
+```bash
+ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
+cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
+pid_file /run/mosquitto/mosquitto.pid
+persistence true
+persistence_location /var/lib/mosquitto/
+log_dest file /var/log/mosquitto/mosquitto.log
+
+listener 1883 0.0.0.0
+allow_anonymous true
+max_connections 500
+MQTTCONF
+rm -f /etc/mosquitto/conf.d/mqtt-gw.conf
+pkill mosquitto 2>/dev/null; sleep 1
+systemctl reset-failed mosquitto
+systemctl start mosquitto
+EOF
+```
+
+### Vérifier / relancer le simulateur de température
+
+```bash
+# Vérifier si le simulateur tourne
+ssh -i ~/labsuser.pem ubuntu@<GW_IP> "ps aux | grep simulator | grep -v grep; tail -5 /tmp/simulator.log"
+
+# Relancer le simulateur si mort
+ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
+cat > /tmp/simulator.py << 'PYEOF'
+import json, math, random, time, paho.mqtt.client as mqtt
+client = mqtt.Client()
+client.connect("localhost", 1883)
+client.loop_start()
+t = 0
+while True:
+    temp = round(22.0 + 4.0 * math.sin(2 * math.pi * t / 60) + random.uniform(-0.5, 0.5), 2)
+    payload = json.dumps({"sensor_id": "temp-sensor-01", "value": temp, "unit": "celsius",
+                          "timestamp": int(time.time()), "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    client.publish("sensors/temperature", payload, qos=1)
+    print(f"Publie: {temp}C")
+    t += 5
+    time.sleep(5)
+PYEOF
+nohup python3 /tmp/simulator.py > /tmp/simulator.log 2>&1 &
+echo "PID: $!"
+EOF
+```
+
+> **Note** : les IPs publiques des GW changent à chaque reboot. Récupère la nouvelle IP avec la commande `describe-instances` ci-dessus.
+
+### Tester la connectivité MQTT manuellement
+
+```bash
+# Depuis la machine EC2 (nécessite mosquitto-clients)
+mosquitto_sub -h iot-mqtt-nlb-xxx.elb.us-east-1.amazonaws.com -p 1883 -t "sensors/temperature" -v
+
+# Publier un message de test
+mosquitto_pub -h iot-mqtt-nlb-xxx.elb.us-east-1.amazonaws.com -p 1883 \
+  -t "sensors/temperature" \
+  -m '{"sensor_id":"test","value":25.0,"unit":"celsius","timestamp":0,"timestamp_iso":"2026-01-01T00:00:00Z"}'
+```
+
+### Problème : app Android / dashboard ne reçoit rien
+
+1. Vérifier que le NLB targets sont `healthy` (voir ci-dessus)
+2. Vérifier que le simulateur publie (`tail -f /tmp/simulator.log`)
+3. Vérifier que le broker dans l'app / dashboard correspond au DNS NLB actuel
+4. Tester avec `mosquitto_sub` pour isoler le problème
+
+### Vérifier SSM
+
+```bash
+aws ssm describe-instance-information --region us-east-1 \
+  --query 'InstanceInformationList[*].{ID:InstanceId,Ping:PingStatus}' --output table
 ```
