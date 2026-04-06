@@ -141,209 +141,156 @@ if [ -n "${INST_INGESTION:-}" ]; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# 4. Instances EC2
+# Fonction : purge complète d'un VPC (toutes ses dépendances)
+# Appelée sur le VPC du state + tous les VPCs orphelins du projet
 # ════════════════════════════════════════════════════════════
-log "4. Terminaison des instances EC2..."
-INSTANCES=""
-for INST_VAR in INST_GW1 INST_GW2 INST_SNORT INST_INGESTION; do
-  INST_ID="${!INST_VAR:-}"
-  [ -n "$INST_ID" ] && INSTANCES="$INSTANCES $INST_ID"
-done
+purge_vpc() {
+  local VPC="$1"
+  [ -z "$VPC" ] && return
+  log "Purge VPC $VPC..."
 
-# Fallback : chercher par tag Project si state vide
-if [ -z "$INSTANCES" ]; then
-  INSTANCES=$(aws ec2 describe-instances --region "$REGION" \
-    --filters "Name=tag:Project,Values=$PROJECT" \
+  # ── EC2 Instances ────────────────────────────────────────
+  INSTS=$(aws ec2 describe-instances --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" \
               "Name=instance-state-name,Values=running,stopped,stopping,pending" \
     --query 'Reservations[].Instances[].InstanceId' \
     --output text 2>/dev/null || true)
-fi
-
-if [ -n "$INSTANCES" ]; then
-  aws ec2 terminate-instances --region "$REGION" \
-    --instance-ids $INSTANCES > /dev/null 2>/dev/null || true
-  log "Attente terminaison instances..."
-  aws ec2 wait instance-terminated --region "$REGION" \
-    --instance-ids $INSTANCES 2>/dev/null || true
-  log "Instances terminees"
-else
-  skip "Aucune instance EC2 trouvee"
-fi
-
-# ════════════════════════════════════════════════════════════
-# 5. Security Groups
-# ════════════════════════════════════════════════════════════
-log "5. Suppression Security Groups..."
-sleep 5
-
-# Chercher par tag si variables pas dans le state
-SG_IDS=""
-for SG_VAR in SG_GW SG_SNORT SG_INGESTION SG_NLB; do
-  SG_ID="${!SG_VAR:-}"
-  [ -n "$SG_ID" ] && SG_IDS="$SG_IDS $SG_ID"
-done
-
-if [ -z "$SG_IDS" ]; then
-  SG_IDS=$(aws ec2 describe-security-groups --region "$REGION" \
-    --filters "Name=tag:Project,Values=$PROJECT" \
-    --query 'SecurityGroups[].GroupId' \
-    --output text 2>/dev/null || true)
-fi
-
-for SG_ID in $SG_IDS; do
-  safe_delete aws ec2 delete-security-group \
-    --region "$REGION" --group-id "$SG_ID"
-done
-
-# ════════════════════════════════════════════════════════════
-# 6. NAT Gateway + EIP
-# ════════════════════════════════════════════════════════════
-log "6. Suppression NAT Gateway..."
-
-# Fallback : chercher par tag
-if [ -z "${NAT_GW:-}" ] && [ -n "${VPC_ID:-}" ]; then
-  NAT_GW=$(none_to_empty "$(aws ec2 describe-nat-gateways --region "$REGION" \
-    --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available,pending" \
-    --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)")
-fi
-
-if [ -n "${NAT_GW:-}" ]; then
-  safe_delete aws ec2 delete-nat-gateway \
-    --region "$REGION" --nat-gateway-id "$NAT_GW"
-  log "Attente suppression NAT Gateway (2-3 min)..."
-  aws ec2 wait nat-gateway-deleted --region "$REGION" \
-    --nat-gateway-ids "$NAT_GW" 2>/dev/null || sleep 90
-fi
-
-[ -n "${EIP_ALLOC:-}" ] && safe_delete aws ec2 release-address \
-  --region "$REGION" --allocation-id "$EIP_ALLOC"
-
-# ════════════════════════════════════════════════════════════
-# 7. Route Tables
-# ════════════════════════════════════════════════════════════
-log "7. Suppression Route Tables..."
-
-RT_IDS=""
-for RT_VAR in RT_DMZ RT_PRIVATE; do
-  RT_ID="${!RT_VAR:-}"
-  [ -n "$RT_ID" ] && RT_IDS="$RT_IDS $RT_ID"
-done
-
-# Fallback : chercher par tag
-if [ -z "$RT_IDS" ] && [ -n "${VPC_ID:-}" ]; then
-  RT_IDS=$(aws ec2 describe-route-tables --region "$REGION" \
-    --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Project,Values=$PROJECT" \
-    --query 'RouteTables[].RouteTableId' --output text 2>/dev/null || true)
-fi
-
-for RT_ID in $RT_IDS; do
-  ASSOCS=$(aws ec2 describe-route-tables --region "$REGION" \
-    --route-table-ids "$RT_ID" \
-    --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' \
-    --output text 2>/dev/null || true)
-  for ASSOC in $ASSOCS; do
-    safe_delete aws ec2 disassociate-route-table \
-      --region "$REGION" --association-id "$ASSOC"
-  done
-  safe_delete aws ec2 delete-route-table \
-    --region "$REGION" --route-table-id "$RT_ID"
-done
-
-# ════════════════════════════════════════════════════════════
-# 8. NACLs
-# ════════════════════════════════════════════════════════════
-log "8. Suppression NACLs..."
-if [ -n "${VPC_ID:-}" ]; then
-  DEFAULT_NACL=$(none_to_empty "$(aws ec2 describe-network-acls --region "$REGION" \
-    --filters "Name=vpc-id,Values=$VPC_ID" "Name=default,Values=true" \
-    --query 'NetworkAcls[0].NetworkAclId' --output text 2>/dev/null)")
-
-  NACL_IDS=""
-  for NACL_VAR in NACL_DMZ NACL_PRIVATE; do
-    NACL_ID="${!NACL_VAR:-}"
-    [ -n "$NACL_ID" ] && NACL_IDS="$NACL_IDS $NACL_ID"
-  done
-
-  # Fallback : chercher par VPC
-  if [ -z "$NACL_IDS" ]; then
-    NACL_IDS=$(aws ec2 describe-network-acls --region "$REGION" \
-      --filters "Name=vpc-id,Values=$VPC_ID" "Name=default,Values=false" \
-      --query 'NetworkAcls[].NetworkAclId' --output text 2>/dev/null || true)
+  if [ -n "$INSTS" ]; then
+    aws ec2 terminate-instances --region "$REGION" \
+      --instance-ids $INSTS > /dev/null 2>/dev/null || true
+    log "  Attente terminaison instances de $VPC..."
+    aws ec2 wait instance-terminated --region "$REGION" \
+      --instance-ids $INSTS 2>/dev/null || true
   fi
 
-  for NACL_ID in $NACL_IDS; do
-    if [ -n "$DEFAULT_NACL" ]; then
-      ASSOCS=$(aws ec2 describe-network-acls --region "$REGION" \
-        --network-acl-ids "$NACL_ID" \
-        --query 'NetworkAcls[0].Associations[].NetworkAclAssociationId' \
-        --output text 2>/dev/null || true)
-      for ASSOC in $ASSOCS; do
-        aws ec2 replace-network-acl-association --region "$REGION" \
-          --association-id "$ASSOC" --network-acl-id "$DEFAULT_NACL" \
-          > /dev/null 2>/dev/null || true
-      done
-    fi
-    safe_delete aws ec2 delete-network-acl \
-      --region "$REGION" --network-acl-id "$NACL_ID"
+  # ── NAT Gateways ─────────────────────────────────────────
+  NAT_IDS=$(aws ec2 describe-nat-gateways --region "$REGION" \
+    --filter "Name=vpc-id,Values=$VPC" "Name=state,Values=available,pending" \
+    --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || true)
+  for NAT in $NAT_IDS; do
+    aws ec2 delete-nat-gateway --region "$REGION" \
+      --nat-gateway-id "$NAT" > /dev/null 2>/dev/null || true
+    del "  NAT GW $NAT"
   done
-fi
+  # Attendre la suppression de tous les NAT GW avant de libérer les EIPs
+  for NAT in $NAT_IDS; do
+    aws ec2 wait nat-gateway-deleted --region "$REGION" \
+      --nat-gateway-ids "$NAT" 2>/dev/null || sleep 60
+  done
+
+  # ── EIPs associées au VPC (via NAT GW) ───────────────────
+  EIP_IDS=$(aws ec2 describe-addresses --region "$REGION" \
+    --query "Addresses[?Domain=='vpc' && AssociationId==null].AllocationId" \
+    --output text 2>/dev/null || true)
+  for EIP in $EIP_IDS; do
+    aws ec2 release-address --region "$REGION" \
+      --allocation-id "$EIP" 2>/dev/null || true
+  done
+
+  # ── Internet Gateways ─────────────────────────────────────
+  for IGW in $(aws ec2 describe-internet-gateways --region "$REGION" \
+    --filters "Name=attachment.vpc-id,Values=$VPC" \
+    --query 'InternetGateways[].InternetGatewayId' \
+    --output text 2>/dev/null || true); do
+    aws ec2 detach-internet-gateway --region "$REGION" \
+      --internet-gateway-id "$IGW" --vpc-id "$VPC" 2>/dev/null || true
+    aws ec2 delete-internet-gateway --region "$REGION" \
+      --internet-gateway-id "$IGW" 2>/dev/null && del "  IGW $IGW" || true
+  done
+
+  # ── NACLs (non-default) ───────────────────────────────────
+  DEFAULT_NACL=$(aws ec2 describe-network-acls --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" "Name=default,Values=true" \
+    --query 'NetworkAcls[0].NetworkAclId' --output text 2>/dev/null || true)
+  for NACL in $(aws ec2 describe-network-acls --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" "Name=default,Values=false" \
+    --query 'NetworkAcls[].NetworkAclId' --output text 2>/dev/null || true); do
+    [ -n "$DEFAULT_NACL" ] && for ASSOC in $(aws ec2 describe-network-acls \
+      --region "$REGION" --network-acl-ids "$NACL" \
+      --query 'NetworkAcls[0].Associations[].NetworkAclAssociationId' \
+      --output text 2>/dev/null || true); do
+      aws ec2 replace-network-acl-association --region "$REGION" \
+        --association-id "$ASSOC" --network-acl-id "$DEFAULT_NACL" \
+        > /dev/null 2>/dev/null || true
+    done
+    aws ec2 delete-network-acl --region "$REGION" \
+      --network-acl-id "$NACL" 2>/dev/null || true
+  done
+
+  # ── Route Tables (non-main) ───────────────────────────────
+  for RT in $(aws ec2 describe-route-tables --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" \
+    --query 'RouteTables[?Associations[0].Main!=`true`].RouteTableId' \
+    --output text 2>/dev/null || true); do
+    for ASSOC in $(aws ec2 describe-route-tables --region "$REGION" \
+      --route-table-ids "$RT" \
+      --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' \
+      --output text 2>/dev/null || true); do
+      aws ec2 disassociate-route-table --region "$REGION" \
+        --association-id "$ASSOC" 2>/dev/null || true
+    done
+    aws ec2 delete-route-table --region "$REGION" \
+      --route-table-id "$RT" 2>/dev/null || true
+  done
+
+  # ── Subnets ───────────────────────────────────────────────
+  for SN in $(aws ec2 describe-subnets --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" \
+    --query 'Subnets[].SubnetId' --output text 2>/dev/null || true); do
+    aws ec2 delete-subnet --region "$REGION" \
+      --subnet-id "$SN" 2>/dev/null || true
+  done
+
+  # ── Security Groups (non-default) ────────────────────────
+  sleep 5
+  for SG in $(aws ec2 describe-security-groups --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC" \
+    --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+    --output text 2>/dev/null || true); do
+    aws ec2 delete-security-group --region "$REGION" \
+      --group-id "$SG" 2>/dev/null || true
+  done
+
+  # ── VPC ───────────────────────────────────────────────────
+  aws ec2 delete-vpc --region "$REGION" --vpc-id "$VPC" 2>/dev/null \
+    && del "  VPC $VPC supprime" \
+    || warn "  VPC $VPC : suppression echouee (ressources encore presentes ?)"
+}
 
 # ════════════════════════════════════════════════════════════
-# 9. Subnets
+# 4. EC2 + NAT + SGs + Subnets + IGW + VPC
+#    (via purge_vpc sur le VPC du state ET tous les orphelins)
 # ════════════════════════════════════════════════════════════
-log "9. Suppression Subnets..."
+log "4. Suppression EC2, NAT, SGs, Subnets, IGW, VPCs..."
 
-SUBNET_IDS=""
-for SN_VAR in SUBNET_DMZ SUBNET_PRIVATE; do
-  SN_ID="${!SN_VAR:-}"
-  [ -n "$SN_ID" ] && SUBNET_IDS="$SUBNET_IDS $SN_ID"
+# Collecter tous les VPCs du projet (state + orphelins par tag/nom)
+ALL_VPCS=""
+[ -n "${VPC_ID:-}" ] && ALL_VPCS="$VPC_ID"
+
+ORPHAN_VPCS=$(aws ec2 describe-vpcs --region "$REGION" \
+  --filters "Name=tag:Project,Values=$PROJECT" \
+  --query 'Vpcs[].VpcId' --output text 2>/dev/null || true)
+
+# Aussi chercher par nom si pas de tag (déploiements anciens)
+NAMED_VPCS=$(aws ec2 describe-vpcs --region "$REGION" \
+  --filters "Name=tag:Name,Values=${PROJECT}-vpc" \
+  --query 'Vpcs[].VpcId' --output text 2>/dev/null || true)
+
+for V in $ORPHAN_VPCS $NAMED_VPCS; do
+  [[ "$ALL_VPCS" != *"$V"* ]] && ALL_VPCS="$ALL_VPCS $V"
 done
 
-# Fallback : chercher par VPC
-if [ -z "$SUBNET_IDS" ] && [ -n "${VPC_ID:-}" ]; then
-  SUBNET_IDS=$(aws ec2 describe-subnets --region "$REGION" \
-    --filters "Name=vpc-id,Values=$VPC_ID" \
-    --query 'Subnets[].SubnetId' --output text 2>/dev/null || true)
+if [ -n "$ALL_VPCS" ]; then
+  for V in $ALL_VPCS; do
+    purge_vpc "$V"
+  done
+else
+  skip "Aucun VPC du projet trouve"
 fi
 
-for SN_ID in $SUBNET_IDS; do
-  safe_delete aws ec2 delete-subnet \
-    --region "$REGION" --subnet-id "$SN_ID"
-done
-
-# ════════════════════════════════════════════════════════════
-# 10. Internet Gateway
-# ════════════════════════════════════════════════════════════
-log "10. Suppression Internet Gateway..."
-
-# Fallback : chercher par VPC
-if [ -z "${IGW_ID:-}" ] && [ -n "${VPC_ID:-}" ]; then
-  IGW_ID=$(none_to_empty "$(aws ec2 describe-internet-gateways --region "$REGION" \
-    --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
-    --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null)")
-fi
-
-if [ -n "${IGW_ID:-}" ] && [ -n "${VPC_ID:-}" ]; then
-  safe_delete aws ec2 detach-internet-gateway --region "$REGION" \
-    --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
-  safe_delete aws ec2 delete-internet-gateway --region "$REGION" \
-    --internet-gateway-id "$IGW_ID"
-fi
-
-# ════════════════════════════════════════════════════════════
-# 11. VPC
-# ════════════════════════════════════════════════════════════
-log "11. Suppression VPC..."
-
-# Fallback : chercher par tag
-if [ -z "${VPC_ID:-}" ]; then
-  VPC_ID=$(none_to_empty "$(aws ec2 describe-vpcs --region "$REGION" \
-    --filters "Name=tag:Project,Values=$PROJECT" \
-    --query 'Vpcs[0].VpcId' --output text 2>/dev/null)")
-fi
-
-[ -n "${VPC_ID:-}" ] && safe_delete aws ec2 delete-vpc \
-  --region "$REGION" --vpc-id "$VPC_ID"
+# EIP restante du state (si pas libérée dans purge_vpc)
+[ -n "${EIP_ALLOC:-}" ] && aws ec2 release-address \
+  --region "$REGION" --allocation-id "$EIP_ALLOC" 2>/dev/null || true
 
 # ════════════════════════════════════════════════════════════
 # 12. CloudWatch + SNS
