@@ -1036,14 +1036,14 @@ section "13/14 - MQTT PORT 1883 (DEMO / APP ANDROID)"
 
 # ── Règle SG GW : ouvrir port 1883 ───────────────────────────────────────────
 EXISTING_1883=$(aws ec2 describe-security-groups \
-  --region "$REGION" --group-ids "$SG_GW" \
+  --region "$REGION" --group-ids "$SG_MQTT_GW" \
   --query "SecurityGroups[0].IpPermissions[?FromPort==\`1883\`]" \
   --output text 2>/dev/null || true)
 if [[ -z "$EXISTING_1883" ]]; then
   aws ec2 authorize-security-group-ingress \
-    --region "$REGION" --group-id "$SG_GW" \
+    --region "$REGION" --group-id "$SG_MQTT_GW" \
     --protocol tcp --port 1883 --cidr 0.0.0.0/0 > /dev/null
-  log "Port 1883 ouvert sur le SG GW ($SG_GW)"
+  log "Port 1883 ouvert sur le SG GW ($SG_MQTT_GW)"
 else
   log "Port 1883 deja ouvert sur le SG GW"
 fi
