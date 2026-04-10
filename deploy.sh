@@ -49,6 +49,8 @@ apt-get install -y mosquitto mosquitto-clients amazon-cloudwatch-agent jq curl w
 wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+# Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
+systemctl stop mosquitto || true
 mkdir -p /var/log/mosquitto /var/lib/mosquitto
 chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
 cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
@@ -61,7 +63,7 @@ listener 1883 0.0.0.0
 allow_anonymous true
 max_connections 500
 MQTTCONF
-rm -f /etc/mosquitto/conf.d/mqtt-gw.conf
+rm -f /etc/mosquitto/conf.d/*.conf
 mkdir -p /etc/mosquitto/certs
 openssl req -new -x509 -days 365 -nodes \
   -out /etc/mosquitto/certs/server.crt \
@@ -85,7 +87,9 @@ echo "Bridge configure vers $INGESTION_IP"
 BRIDGESCRIPT
 chmod +x /usr/local/bin/configure_bridge.sh
 systemctl enable mosquitto
-systemctl start mosquitto
+systemctl restart mosquitto
+sleep 2
+systemctl is-active mosquitto && echo "[OK] Mosquitto actif" || echo "[ERREUR] Mosquitto non demarre"
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << CWCONF
 {"agent":{"run_as_user":"root"},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/mosquitto/mosquitto.log","log_group_name":"/iot-mqtt/mqtt-gateway","log_stream_name":"${INSTANCE_ID}"},{"file_path":"/var/log/syslog","log_group_name":"/iot-mqtt/system","log_stream_name":"${INSTANCE_ID}-syslog"}]}}}}
@@ -174,19 +178,26 @@ wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_am
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 pip3 install paho-mqtt
-mkdir -p /var/log/mosquitto
-chown mosquitto:mosquitto /var/log/mosquitto
-cat > /etc/mosquitto/conf.d/ingestion.conf << 'MQTTCONF'
-listener 1883
-bind_address 0.0.0.0
-allow_anonymous true
-log_type all
-log_dest file /var/log/mosquitto/mosquitto.log
+# Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
+systemctl stop mosquitto || true
+mkdir -p /var/log/mosquitto /var/lib/mosquitto
+chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
+cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
+pid_file /run/mosquitto/mosquitto.pid
 persistence true
 persistence_location /var/lib/mosquitto/
+log_dest file /var/log/mosquitto/mosquitto.log
+log_type all
+
+listener 1883 0.0.0.0
+allow_anonymous true
+max_connections 500
 MQTTCONF
+rm -f /etc/mosquitto/conf.d/*.conf
 systemctl enable mosquitto
-systemctl start mosquitto
+systemctl restart mosquitto
+sleep 2
+systemctl is-active mosquitto && echo "[OK] Mosquitto actif (ingestion)" || echo "[ERREUR] Mosquitto non demarre (ingestion)"
 mkdir -p /opt/ingestion /var/log/ingestion
 cat > /opt/ingestion/subscriber.py << 'PYEOF'
 #!/usr/bin/env python3

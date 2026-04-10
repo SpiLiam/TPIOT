@@ -359,16 +359,16 @@ aws elbv2 describe-target-health --target-group-arn "$TG" --region us-east-1 \
 
 ```bash
 # Remplace GW_IP par l'IP publique de la GW
-chmod 400 ~/labsuser.pem
-ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo systemctl status mosquitto --no-pager | head -8; sudo ss -tlnp | grep 1883"
+chmod 400 ~/TPIOT/labsuser.pem
+ssh -i ~/TPIOT/labsuser.pem ubuntu@<GW_IP> "sudo systemctl status mosquitto --no-pager | head -8; sudo ss -tlnp | grep 1883"
 
 # Si arrêté, relancer :
-ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo systemctl start mosquitto"
+ssh -i ~/TPIOT/labsuser.pem ubuntu@<GW_IP> "sudo systemctl start mosquitto"
 ```
 
 Si Mosquitto refuse de démarrer (erreur config) :
 ```bash
-ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
+ssh -i ~/TPIOT/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
 cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
 pid_file /run/mosquitto/mosquitto.pid
 persistence true
@@ -379,10 +379,10 @@ listener 1883 0.0.0.0
 allow_anonymous true
 max_connections 500
 MQTTCONF
-rm -f /etc/mosquitto/conf.d/mqtt-gw.conf
+rm -f /etc/mosquitto/conf.d/*.conf
 pkill mosquitto 2>/dev/null; sleep 1
 systemctl reset-failed mosquitto
-systemctl start mosquitto
+systemctl restart mosquitto
 EOF
 ```
 
@@ -390,10 +390,10 @@ EOF
 
 ```bash
 # Vérifier si le simulateur tourne
-ssh -i ~/labsuser.pem ubuntu@<GW_IP> "ps aux | grep simulator | grep -v grep; tail -5 /tmp/simulator.log"
+ssh -i ~/TPIOT/labsuser.pem ubuntu@<GW_IP> "ps aux | grep simulator | grep -v grep; tail -5 /tmp/simulator.log"
 
 # Relancer le simulateur si mort
-ssh -i ~/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
+ssh -i ~/TPIOT/labsuser.pem ubuntu@<GW_IP> "sudo bash -s" << 'EOF'
 cat > /tmp/simulator.py << 'PYEOF'
 import json, math, random, time, paho.mqtt.client as mqtt
 client = mqtt.Client()
