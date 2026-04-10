@@ -473,9 +473,21 @@ echo -e "  Region     : ${BOLD}$REGION${NC}"
 echo -e "  Key Pair   : ${BOLD}$KEY_PAIR${NC}"
 echo ""
 
-# Verifier que la key pair existe
-aws ec2 describe-key-pairs --region "$REGION" --key-names "$KEY_PAIR" &>/dev/null \
-  || warn "Key pair '$KEY_PAIR' introuvable dans AWS. Change KEY_PAIR=<nom> avant de relancer."
+# Verifier que la key pair existe (non bloquant si les perms manquent)
+KP_CHECK=$(aws ec2 describe-key-pairs --region "$REGION" --key-names "$KEY_PAIR" \
+  --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || echo "")
+if [[ -z "$KP_CHECK" || "$KP_CHECK" == "None" ]]; then
+  # Tenter de lister toutes les key pairs disponibles
+  AVAILABLE_KP=$(aws ec2 describe-key-pairs --region "$REGION" \
+    --query 'KeyPairs[*].KeyName' --output text 2>/dev/null || echo "")
+  if [[ -n "$AVAILABLE_KP" ]]; then
+    warn "Key pair '$KEY_PAIR' introuvable. Key pairs disponibles : $AVAILABLE_KP"
+    warn "Relance avec : KEY_PAIR=<nom> bash deploy.sh"
+    exit 1
+  else
+    warn "Impossible de verifier la key pair (permissions insuffisantes) — on continue avec '$KEY_PAIR'"
+  fi
+fi
 
 read -r -p "$(echo -e "${YELLOW}⚠️  Confirmer le deploiement sur ce compte ? (yes/no) :${NC} ")" CONFIRM
 [[ "$CONFIRM" == "yes" ]] || { log "Annule."; exit 0; }
@@ -493,17 +505,32 @@ save "DEPLOY_TIME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # ─── AMI Ubuntu 22.04 LTS ────────────────────────────────────
 section "RECHERCHE AMI"
 
-AMI_ID=$(aws ec2 describe-images \
+# 1er essai : SSM Parameter Store (ne necessite pas ec2:DescribeImages)
+AMI_ID=$(aws ssm get-parameter \
   --region "$REGION" \
-  --owners 099720109477 \
-  --filters \
-    "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-    "Name=state,Values=available" \
-    "Name=architecture,Values=x86_64" \
-  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-  --output text)
+  --name "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id" \
+  --query "Parameter.Value" --output text 2>/dev/null || echo "")
 
-[[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && error "AMI Ubuntu 22.04 introuvable"
+# 2eme essai : DescribeImages si SSM echoue
+if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+  AMI_ID=$(aws ec2 describe-images \
+    --region "$REGION" \
+    --owners 099720109477 \
+    --filters \
+      "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+      "Name=state,Values=available" \
+      "Name=architecture,Values=x86_64" \
+    --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+    --output text 2>/dev/null || echo "")
+fi
+
+# Fallback : AMI Ubuntu 22.04 LTS us-east-1 connue (mise a jour regulierement)
+if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+  AMI_ID="ami-0261755bbcb8c4a84"
+  warn "AMI non trouvee via API — utilisation AMI hardcodee : $AMI_ID"
+fi
+
+[[ -z "$AMI_ID" ]] && error "AMI Ubuntu 22.04 introuvable"
 save "AMI_ID" "$AMI_ID"
 log "AMI Ubuntu 22.04 LTS : $AMI_ID"
 
