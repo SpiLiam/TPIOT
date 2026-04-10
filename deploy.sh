@@ -90,7 +90,92 @@ systemctl enable mosquitto
 systemctl restart mosquitto
 sleep 2
 systemctl is-active mosquitto && echo "[OK] Mosquitto actif" || echo "[ERREUR] Mosquitto non demarre"
+
+# ── Simulateur de temperature embarque (sans SSM) ──────────────
+pip3 install paho-mqtt --quiet 2>&1 || true
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+mkdir -p /opt/iot-simulator
+cat > /opt/iot-simulator/sensor_simulator.py << 'SIMEOF'
+#!/usr/bin/env python3
+import json, math, random, time, signal, sys, os
+import paho.mqtt.client as mqtt
+
+BROKER_HOST  = os.getenv('MQTT_BROKER', '127.0.0.1')
+BROKER_PORT  = int(os.getenv('MQTT_PORT', '1883'))
+TOPIC        = os.getenv('MQTT_TOPIC', 'sensors/temperature')
+SENSOR_ID    = os.getenv('SENSOR_ID', 'temp-sensor-gw')
+INTERVAL_SEC = 5
+running = True
+
+def on_connect(client, userdata, flags, rc):
+    codes = {0:"Connecte", 1:"Mauvais protocole", 2:"ID invalide",
+             3:"Serveur indisponible", 4:"Mauvais user/pass", 5:"Non autorise"}
+    print(f"[MQTT] {codes.get(rc, f'Code {rc}')}", flush=True)
+
+def on_disconnect(client, userdata, rc):
+    if rc != 0:
+        print(f"[MQTT] Deconnexion (code {rc}), reconnexion...", flush=True)
+
+def generate_temperature():
+    t = time.time()
+    return round(22.0 + 4.0 * math.sin(2 * math.pi * t / 60) + random.uniform(-0.5, 0.5), 2)
+
+def signal_handler(sig, frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGINT,  signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+while running:
+    try:
+        client = mqtt.Client(client_id=f"simulator-{SENSOR_ID}-{int(time.time())}")
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
+        client.loop_start()
+        print(f"[INFO] Publication sur '{TOPIC}' toutes les {INTERVAL_SEC}s", flush=True)
+        while running:
+            temp = generate_temperature()
+            payload = json.dumps({
+                "sensor_id": SENSOR_ID, "value": temp, "unit": "celsius",
+                "timestamp": int(time.time()),
+                "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            })
+            result = client.publish(TOPIC, payload, qos=1)
+            if result.rc == 0:
+                print(f"[PUBLISH] {temp} C -> {TOPIC}", flush=True)
+            time.sleep(INTERVAL_SEC)
+        client.loop_stop()
+        client.disconnect()
+    except Exception as e:
+        print(f"[ERREUR] {e} — retry dans 10s", flush=True)
+        time.sleep(10)
+SIMEOF
+chmod +x /opt/iot-simulator/sensor_simulator.py
+
+cat > /etc/systemd/system/iot-simulator.service << SVCEOF
+[Unit]
+Description=IoT Temperature Simulator
+After=network.target mosquitto.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/iot-simulator/sensor_simulator.py
+Environment=MQTT_BROKER=127.0.0.1
+Environment=MQTT_PORT=1883
+Environment=MQTT_TOPIC=sensors/temperature
+Environment=SENSOR_ID=temp-sensor-${INSTANCE_ID}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+systemctl daemon-reload
+systemctl enable iot-simulator
+systemctl start iot-simulator
+systemctl is-active iot-simulator && echo "[OK] Simulateur demarre" || echo "[WARN] Simulateur non demarre"
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << CWCONF
 {"agent":{"run_as_user":"root"},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/mosquitto/mosquitto.log","log_group_name":"/iot-mqtt/mqtt-gateway","log_stream_name":"${INSTANCE_ID}"},{"file_path":"/var/log/syslog","log_group_name":"/iot-mqtt/system","log_stream_name":"${INSTANCE_ID}-syslog"}]}}}}
 CWCONF
@@ -1110,70 +1195,12 @@ log "Listener NLB port 1883 cree : $LISTENER_1883"
 section "14/14 - SIMULATEUR CAPTEUR TEMPERATURE (IoT)"
 # ════════════════════════════════════════════════════════════
 
-log "Attente disponibilite SSM sur l'instance ingestion ($INST_INGESTION)..."
-SSM_WAIT=0
-until aws ssm describe-instance-information \
-  --region "$REGION" \
-  --filters "Key=InstanceIds,Values=$INST_INGESTION" \
-  --query 'InstanceInformationList[0].InstanceId' \
-  --output text 2>/dev/null | grep -q "$INST_INGESTION"; do
-  echo -n "."
-  sleep 15
-  SSM_WAIT=$((SSM_WAIT + 15))
-  if [[ $SSM_WAIT -ge 300 ]]; then
-    warn "SSM non disponible apres 5 min."
-    break
-  fi
-done
-echo ""
-
-SSM_UP=$(aws ssm describe-instance-information \
-  --region "$REGION" \
-  --filters "Key=InstanceIds,Values=$INST_INGESTION" \
-  --query 'InstanceInformationList[0].InstanceId' \
-  --output text 2>/dev/null || true)
-
-if [[ "$SSM_UP" == "$INST_INGESTION" ]]; then
-  # Configurer le simulateur avec l'IP prive du GW1
-  sed "s|BROKER_HOST  = .*|BROKER_HOST  = \"$IP_GW1\"|" \
-    /tmp/sensor_simulator.py > /tmp/sensor_simulator_configured.py
-
-  # Encoder en base64 (evite les problemes d'echappement dans SSM JSON)
-  SIM_B64=$(base64 -w 0 /tmp/sensor_simulator_configured.py)
-
-  # Construire le JSON SSM
-  cat > /tmp/ssm_simulator.json << SSMJSON
-{
-  "InstanceIds": ["$INST_INGESTION"],
-  "DocumentName": "AWS-RunShellScript",
-  "Parameters": {
-    "commands": [
-      "apt-get install -y python3-pip 2>/dev/null || true",
-      "pip3 install paho-mqtt --quiet 2>&1 || true",
-      "mkdir -p /opt/iot-simulator",
-      "echo $SIM_B64 | base64 -d > /opt/iot-simulator/sensor_simulator.py",
-      "chmod +x /opt/iot-simulator/sensor_simulator.py",
-      "printf '[Unit]\\nDescription=IoT Temperature Simulator\\nAfter=network.target\\n\\n[Service]\\nType=simple\\nExecStart=/usr/bin/python3 /opt/iot-simulator/sensor_simulator.py\\nRestart=always\\nRestartSec=10\\nStandardOutput=journal\\nStandardError=journal\\n\\n[Install]\\nWantedBy=multi-user.target\\n' > /etc/systemd/system/iot-simulator.service",
-      "systemctl daemon-reload && systemctl enable iot-simulator && systemctl start iot-simulator",
-      "echo '[OK] Simulateur temperature demarre'"
-    ]
-  },
-  "Comment": "Deploy IoT temperature simulator"
-}
-SSMJSON
-
-  CMD_ID=$(aws ssm send-command \
-    --region "$REGION" \
-    --cli-input-json "file:///tmp/ssm_simulator.json" \
-    --query 'Command.CommandId' --output text)
-  save "SIM_CMD_ID" "$CMD_ID"
-  log "Simulateur deploye via SSM (CommandId: $CMD_ID)"
-  log "Verifier : aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INST_INGESTION --region $REGION --query Status"
-else
-  warn "SSM non disponible. Lance le simulateur manuellement :"
-  warn "  aws ssm start-session --target $INST_INGESTION --region $REGION"
-  warn "  pip3 install paho-mqtt && python3 /opt/iot-simulator/sensor_simulator.py"
-fi
+# Le simulateur est embarque directement dans le userdata des GW (service systemd iot-simulator).
+# Il demarre automatiquement apres boot, sans dependance SSM.
+log "Simulateur de temperature : service systemd integre dans GW1 ($INST_GW1) et GW2 ($INST_GW2)"
+log "Verifier apres boot (~3 min) :"
+log "  aws ssm start-session --target $INST_GW1 --region $REGION"
+log "  sudo systemctl status iot-simulator"
 
 # ════════════════════════════════════════════════════════════
 section "RECAPITULATIF FINAL"
