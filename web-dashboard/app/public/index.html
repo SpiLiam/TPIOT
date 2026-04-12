@@ -87,6 +87,10 @@
     <input id="s-port" type="number" placeholder="1883" value="1883">
     <label>Topic</label>
     <input id="s-topic" type="text" placeholder="sensors/temperature" value="sensors/temperature">
+    <label>Utilisateur (optionnel)</label>
+    <input id="s-user" type="text" placeholder="dashboard">
+    <label>Mot de passe (optionnel)</label>
+    <input id="s-pass" type="password" placeholder="Dashboard2024!">
     <div class="modal-actions">
       <button class="btn-cancel" onclick="closeSettings()">Annuler</button>
       <button class="btn-primary" onclick="applySettings()">Appliquer</button>
@@ -232,6 +236,8 @@ function openSettings() {
     document.getElementById('s-host').value  = d.host  || '';
     document.getElementById('s-port').value  = d.port  || 1883;
     document.getElementById('s-topic').value = d.topic || 'sensors/temperature';
+    document.getElementById('s-user').value  = d.user  || '';
+    document.getElementById('s-pass').value  = '';
   });
   s.classList.add('open');
 }
@@ -240,11 +246,13 @@ function applySettings() {
   const host  = document.getElementById('s-host').value.trim();
   const port  = parseInt(document.getElementById('s-port').value) || 1883;
   const topic = document.getElementById('s-topic').value.trim() || 'sensors/temperature';
+  const user  = document.getElementById('s-user').value.trim();
+  const pass  = document.getElementById('s-pass').value;
   if (!host) { alert('Host requis'); return; }
   fetch('/api/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host, port, topic })
+    body: JSON.stringify({ host, port, topic, user, pass })
   }).then(() => {
     closeSettings();
     history = [];
@@ -270,7 +278,7 @@ function connect() {
     if (msg.type === 'init') {
       history = msg.history || [];
       setBadge(msg.status);
-      if (msg.config) document.getElementById('config-info').textContent = `${msg.config.host}:${msg.config.port} → ${msg.config.topic}`;
+      if (msg.config) document.getElementById('config-info').textContent = `${msg.config.host}:${msg.config.port} → ${msg.config.topic}${msg.config.user ? ' ['+msg.config.user+']' : ''}`;
       updateChart(history);
       updateHistoryList(history);
       updateStats(history);
