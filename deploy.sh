@@ -50,7 +50,8 @@ mkdir -p "$SCRIPT_DIR"
 
 # ─── SCRIPTS EMBARQUES (ecrits dans /tmp au lancement) ───────
 write_userdata_scripts() {
-cat > /tmp/userdata_mqtt_gw.sh << 'USERDATA_MQTT_GW_EOF'
+local D="$SCRIPT_DIR"
+cat > "$D/userdata_mqtt_gw.sh" << 'USERDATA_MQTT_GW_EOF'
 #!/bin/bash
 set -x
 exec > /var/log/bootstrap.log 2>&1
@@ -255,7 +256,7 @@ hostnamectl set-hostname "mqtt-gw-${INSTANCE_ID}"
 echo "Bootstrap MQTT GW termine - $(date)" >> /var/log/bootstrap.log
 USERDATA_MQTT_GW_EOF
 
-cat > /tmp/userdata_snort.sh << 'USERDATA_SNORT_EOF'
+cat > "$D/userdata_snort.sh" << 'USERDATA_SNORT_EOF'
 #!/bin/bash
 set -x
 exec > /var/log/bootstrap.log 2>&1
@@ -321,7 +322,7 @@ hostnamectl set-hostname "snort-ids-${INSTANCE_ID}"
 echo "Bootstrap Snort termine - $(date)" >> /var/log/bootstrap.log
 USERDATA_SNORT_EOF
 
-cat > /tmp/userdata_ingestion.sh << 'USERDATA_INGESTION_EOF'
+cat > "$D/userdata_ingestion.sh" << 'USERDATA_INGESTION_EOF'
 #!/bin/bash
 set -x
 exec > /var/log/bootstrap.log 2>&1
@@ -485,7 +486,7 @@ hostnamectl set-hostname "ingestion-${INSTANCE_ID}"
 echo "Bootstrap Ingestion termine - $(date)" >> /var/log/bootstrap.log
 USERDATA_INGESTION_EOF
 
-cat > /tmp/userdata_bastion.sh << 'USERDATA_BASTION_EOF'
+cat > "$D/userdata_bastion.sh" << 'USERDATA_BASTION_EOF'
 #!/bin/bash
 set -x
 exec > /var/log/bootstrap.log 2>&1
@@ -500,7 +501,7 @@ hostnamectl set-hostname "bastion-${INSTANCE_ID}"
 echo "Bootstrap Bastion termine - $(date)" >> /var/log/bootstrap.log
 USERDATA_BASTION_EOF
 
-chmod +x /tmp/userdata_mqtt_gw.sh /tmp/userdata_snort.sh /tmp/userdata_ingestion.sh /tmp/userdata_bastion.sh
+chmod +x "$D/userdata_mqtt_gw.sh" "$D/userdata_snort.sh" "$D/userdata_ingestion.sh" "$D/userdata_bastion.sh"
 
 # ── Script simulateur de capteur temperature ──────────────────
 cat > /tmp/sensor_simulator.py << 'SIMULATOR_EOF'
