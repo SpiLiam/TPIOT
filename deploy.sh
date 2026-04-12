@@ -886,12 +886,9 @@ SG_MQTT_GW=$(aws ec2 create-security-group \
 # MQTT TLS public (via NLB)
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_MQTT_GW" \
   --protocol tcp --port 8883 --cidr 0.0.0.0/0 > /dev/null
-# MQTT interne depuis subnet prive
+# MQTT 1883 ouvert publiquement (NLB pass-through + dashboard externe)
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_MQTT_GW" \
-  --protocol tcp --port 1883 --cidr "$PRIVATE_CIDR" > /dev/null
-# MQTT interne depuis DMZ (entre gateways)
-aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_MQTT_GW" \
-  --protocol tcp --port 1883 --cidr "$DMZ_CIDR" > /dev/null
+  --protocol tcp --port 1883 --cidr 0.0.0.0/0 > /dev/null
 # ICMP VPC
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_MQTT_GW" \
   --protocol icmp --port -1 --cidr "$VPC_CIDR" > /dev/null
