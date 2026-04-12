@@ -6,16 +6,20 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-6134b7971649d60d.elb.us-east-1.amazonaws.com}
+      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-ad167f9257abab10.elb.us-east-1.amazonaws.com}
       - MQTT_PORT=${MQTT_PORT:-1883}
       - MQTT_TOPIC=${MQTT_TOPIC:-sensors/temperature}
+      - MQTT_USER=${MQTT_USER:-dashboard}
+      - MQTT_PASS=${MQTT_PASS:-Dashboard2024!}
     restart: unless-stopped
 
   tests:
     build: ./tests
     environment:
-      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-6134b7971649d60d.elb.us-east-1.amazonaws.com}
+      - MQTT_HOST=${MQTT_HOST:-iot-mqtt-nlb-ad167f9257abab10.elb.us-east-1.amazonaws.com}
       - MQTT_PORT=${MQTT_PORT:-1883}
       - MQTT_TOPIC=${MQTT_TOPIC:-sensors/temperature}
+      - MQTT_USER=${MQTT_USER:-dashboard}
+      - MQTT_PASS=${MQTT_PASS:-Dashboard2024!}
     profiles:
       - tests
