@@ -1078,7 +1078,7 @@ launch_instance() {
     --security-group-ids "$sg" \
     --iam-instance-profile Name="$PROFILE_NAME" \
     --key-name "$KEY_PAIR" \
-    --user-data "file://${SCRIPT_DIR}/${userdata}" \
+    --user-data "$(base64 -w0 "${SCRIPT_DIR}/${userdata}" 2>/dev/null || base64 "${SCRIPT_DIR}/${userdata}")" \
     --block-device-mappings "$EBS_MAPPING" \
     --tag-specifications \
       "ResourceType=instance,Tags=[
