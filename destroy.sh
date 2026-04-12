@@ -293,6 +293,15 @@ fi
   --region "$REGION" --allocation-id "$EIP_ALLOC" 2>/dev/null || true
 
 # ════════════════════════════════════════════════════════════
+# 11b. SSM Parameter Store
+# ════════════════════════════════════════════════════════════
+log "11b. Suppression parametres SSM Parameter Store..."
+for PARAM in "/${PROJECT}/gw1-private-ip" "/${PROJECT}/gw2-private-ip"; do
+  aws ssm delete-parameter --region "$REGION" --name "$PARAM" 2>/dev/null \
+    && del "  SSM $PARAM" || skip "  SSM $PARAM (inexistant)"
+done
+
+# ════════════════════════════════════════════════════════════
 # 12. CloudWatch + SNS
 # ════════════════════════════════════════════════════════════
 log "12. Suppression CloudWatch Log Groups et Alarmes..."
