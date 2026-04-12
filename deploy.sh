@@ -1257,52 +1257,14 @@ log "Listener TCP:8883 cree"
 # ════════════════════════════════════════════════════════════
 section "11/12 - VPC TRAFFIC MIRRORING (Snort IDS)"
 # ════════════════════════════════════════════════════════════
+# Note : le Traffic Mirroring AWS requiert des instances Nitro.
+# Les t2.micro (Xen) ne sont pas supportees — section non bloquante.
+# Snort ecoute quand meme son propre trafic reseau via l'interface locale.
 
-# ENI de l'instance Snort (cible du miroir)
 ENI_SNORT=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_SNORT" \
   --query 'Reservations[0].Instances[0].NetworkInterfaces[0].NetworkInterfaceId' --output text)
 save "ENI_SNORT" "$ENI_SNORT"
 
-# Mirror Target
-MIRROR_TARGET=$(aws ec2 create-traffic-mirror-target \
-  --region "$REGION" \
-  --network-interface-id "$ENI_SNORT" \
-  --description "Snort IDS - destination du trafic miroire" \
-  --query 'TrafficMirrorTarget.TrafficMirrorTargetId' --output text)
-save "MIRROR_TARGET" "$MIRROR_TARGET"
-log "Mirror Target cree : $MIRROR_TARGET"
-
-# Mirror Filter
-MIRROR_FILTER=$(aws ec2 create-traffic-mirror-filter \
-  --region "$REGION" \
-  --description "Filtre trafic MQTT vers Snort" \
-  --query 'TrafficMirrorFilter.TrafficMirrorFilterId' --output text)
-save "MIRROR_FILTER" "$MIRROR_FILTER"
-
-# Regles du filtre - tout le trafic TCP (inclut MQTT 1883/8883)
-aws ec2 create-traffic-mirror-filter-rule \
-  --region "$REGION" \
-  --traffic-mirror-filter-id "$MIRROR_FILTER" \
-  --traffic-direction ingress \
-  --rule-number 100 \
-  --rule-action accept \
-  --protocol 6 \
-  --destination-cidr-block 0.0.0.0/0 \
-  --source-cidr-block 0.0.0.0/0 > /dev/null
-
-aws ec2 create-traffic-mirror-filter-rule \
-  --region "$REGION" \
-  --traffic-mirror-filter-id "$MIRROR_FILTER" \
-  --traffic-direction egress \
-  --rule-number 100 \
-  --rule-action accept \
-  --protocol 6 \
-  --destination-cidr-block 0.0.0.0/0 \
-  --source-cidr-block 0.0.0.0/0 > /dev/null
-
-log "Regles Mirror Filter configurees"
-
-# ENIs des gateways MQTT
 ENI_GW1=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_GW1" \
   --query 'Reservations[0].Instances[0].NetworkInterfaces[0].NetworkInterfaceId' --output text)
 ENI_GW2=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_GW2" \
@@ -1310,28 +1272,48 @@ ENI_GW2=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_GW
 save "ENI_GW1" "$ENI_GW1"
 save "ENI_GW2" "$ENI_GW2"
 
-# Session miroir GW1 -> Snort
-SESSION_GW1=$(aws ec2 create-traffic-mirror-session \
+MIRROR_TARGET=$(aws ec2 create-traffic-mirror-target \
   --region "$REGION" \
-  --network-interface-id "$ENI_GW1" \
-  --traffic-mirror-target-id "$MIRROR_TARGET" \
-  --traffic-mirror-filter-id "$MIRROR_FILTER" \
-  --session-number 1 \
-  --description "Mirror mqtt-gw1 vers snort-ids" \
-  --query 'TrafficMirrorSession.TrafficMirrorSessionId' --output text)
-save "SESSION_GW1" "$SESSION_GW1"
+  --network-interface-id "$ENI_SNORT" \
+  --description "Snort IDS - destination du trafic miroire" \
+  --query 'TrafficMirrorTarget.TrafficMirrorTargetId' --output text 2>/dev/null || echo "")
 
-# Session miroir GW2 -> Snort
-SESSION_GW2=$(aws ec2 create-traffic-mirror-session \
-  --region "$REGION" \
-  --network-interface-id "$ENI_GW2" \
-  --traffic-mirror-target-id "$MIRROR_TARGET" \
-  --traffic-mirror-filter-id "$MIRROR_FILTER" \
-  --session-number 2 \
-  --description "Mirror mqtt-gw2 vers snort-ids" \
-  --query 'TrafficMirrorSession.TrafficMirrorSessionId' --output text)
-save "SESSION_GW2" "$SESSION_GW2"
-log "Traffic Mirroring actif : GW1($ENI_GW1) + GW2($ENI_GW2) -> Snort($ENI_SNORT)"
+if [ -n "$MIRROR_TARGET" ] && [ "$MIRROR_TARGET" != "None" ]; then
+  save "MIRROR_TARGET" "$MIRROR_TARGET"
+  MIRROR_FILTER=$(aws ec2 create-traffic-mirror-filter \
+    --region "$REGION" \
+    --description "Filtre trafic MQTT vers Snort" \
+    --query 'TrafficMirrorFilter.TrafficMirrorFilterId' --output text 2>/dev/null || echo "")
+  save "MIRROR_FILTER" "$MIRROR_FILTER"
+
+  aws ec2 create-traffic-mirror-filter-rule --region "$REGION" \
+    --traffic-mirror-filter-id "$MIRROR_FILTER" --traffic-direction ingress \
+    --rule-number 100 --rule-action accept --protocol 6 \
+    --destination-cidr-block 0.0.0.0/0 --source-cidr-block 0.0.0.0/0 > /dev/null 2>/dev/null || true
+  aws ec2 create-traffic-mirror-filter-rule --region "$REGION" \
+    --traffic-mirror-filter-id "$MIRROR_FILTER" --traffic-direction egress \
+    --rule-number 100 --rule-action accept --protocol 6 \
+    --destination-cidr-block 0.0.0.0/0 --source-cidr-block 0.0.0.0/0 > /dev/null 2>/dev/null || true
+
+  SESSION_GW1=$(aws ec2 create-traffic-mirror-session --region "$REGION" \
+    --network-interface-id "$ENI_GW1" \
+    --traffic-mirror-target-id "$MIRROR_TARGET" \
+    --traffic-mirror-filter-id "$MIRROR_FILTER" \
+    --session-number 1 --description "Mirror mqtt-gw1 vers snort-ids" \
+    --query 'TrafficMirrorSession.TrafficMirrorSessionId' --output text 2>/dev/null || echo "")
+  save "SESSION_GW1" "$SESSION_GW1"
+
+  SESSION_GW2=$(aws ec2 create-traffic-mirror-session --region "$REGION" \
+    --network-interface-id "$ENI_GW2" \
+    --traffic-mirror-target-id "$MIRROR_TARGET" \
+    --traffic-mirror-filter-id "$MIRROR_FILTER" \
+    --session-number 2 --description "Mirror mqtt-gw2 vers snort-ids" \
+    --query 'TrafficMirrorSession.TrafficMirrorSessionId' --output text 2>/dev/null || echo "")
+  save "SESSION_GW2" "$SESSION_GW2"
+  log "Traffic Mirroring actif : GW1+GW2 -> Snort"
+else
+  warn "Traffic Mirroring non supporte (t2.micro = Xen, pas Nitro) — Snort ecoute en local sur son interface"
+fi
 
 # ════════════════════════════════════════════════════════════
 section "12/14 - CLOUDWATCH LOGS + ALARMES"
