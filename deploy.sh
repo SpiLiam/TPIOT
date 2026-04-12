@@ -56,11 +56,14 @@ cat > "$D/userdata_mqtt_gw.sh" << 'USERDATA_MQTT_GW_EOF'
 set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
-apt-get install -y mosquitto mosquitto-clients amazon-cloudwatch-agent jq curl wget openssl
+apt-get install -y mosquitto mosquitto-clients python3-pip jq curl wget openssl
 # SSM Agent (non inclus par defaut sur Ubuntu 22.04 Canonical)
 wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+# CloudWatch Agent (pas dans les repos Ubuntu standard, install via wget)
+wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i amazon-cloudwatch-agent.deb && rm -f amazon-cloudwatch-agent.deb || true
 # Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
 systemctl stop mosquitto || true
 mkdir -p /var/log/mosquitto /var/lib/mosquitto /etc/mosquitto/certs
@@ -261,11 +264,14 @@ cat > "$D/userdata_snort.sh" << 'USERDATA_SNORT_EOF'
 set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
-apt-get install -y snort amazon-cloudwatch-agent jq curl libpcap-dev net-tools
+apt-get install -y snort jq curl libpcap-dev net-tools
 # SSM Agent
 wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+# CloudWatch Agent (pas dans les repos Ubuntu standard, install via wget)
+wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i amazon-cloudwatch-agent.deb && rm -f amazon-cloudwatch-agent.deb || true
 mkdir -p /etc/snort/rules /var/log/snort
 chmod 755 /var/log/snort
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
@@ -327,11 +333,14 @@ cat > "$D/userdata_ingestion.sh" << 'USERDATA_INGESTION_EOF'
 set -x
 exec > /var/log/bootstrap.log 2>&1
 apt-get update -y
-apt-get install -y python3 python3-pip mosquitto mosquitto-clients amazon-cloudwatch-agent jq curl
+apt-get install -y python3 python3-pip mosquitto mosquitto-clients jq curl
 # SSM Agent
 wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+# CloudWatch Agent (pas dans les repos Ubuntu standard, install via wget)
+wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i amazon-cloudwatch-agent.deb && rm -f amazon-cloudwatch-agent.deb || true
 pip3 install paho-mqtt boto3
 # Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
 systemctl stop mosquitto || true
