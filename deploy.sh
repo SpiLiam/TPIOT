@@ -20,19 +20,29 @@ section() { echo -e "\n${BOLD}${BLUE}═══ $* ═══${NC}\n"; }
 # ─── CONFIGURATION ───────────────────────────────────────────
 REGION="us-east-1"
 AZ="us-east-1a"
+AZ_B="us-east-1b"
 PROJECT="iot-mqtt"
 ENV="prod"
 
-VPC_CIDR="10.0.0.0/16"
-DMZ_CIDR="10.0.1.0/24"
-PRIVATE_CIDR="10.0.2.0/24"
+# CIDRs conformes au cahier des charges (10.1.0.0/16)
+VPC_CIDR="10.1.0.0/16"
+DMZ_CIDR="10.1.1.0/24"
+DMZ_CIDR_B="10.1.3.0/24"
+PRIVATE_CIDR="10.1.2.0/24"
 
 # Nom de la key pair dans AWS (doit correspondre a labsuser.pem)
 KEY_PAIR="${KEY_PAIR:-vockey}"
 
-INSTANCE_TYPE_GW="t3.small"
-INSTANCE_TYPE_SNORT="t3.medium"
-INSTANCE_TYPE_INGESTION="t3.small"
+# Instances t2.micro (consigne du projet)
+INSTANCE_TYPE_GW="t2.micro"
+INSTANCE_TYPE_SNORT="t2.micro"
+INSTANCE_TYPE_INGESTION="t2.micro"
+INSTANCE_TYPE_BASTION="t2.micro"
+
+# Credentials MQTT (a changer en prod)
+MQTT_PASS_SENSOR="Sensor2024!"
+MQTT_PASS_INGESTION="Ingestion2024!"
+MQTT_PASS_DASHBOARD="Dashboard2024!"
 
 STATE_FILE="./infra_state.env"
 SCRIPT_DIR="/tmp"
@@ -51,26 +61,81 @@ dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
 # Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
 systemctl stop mosquitto || true
-mkdir -p /var/log/mosquitto /var/lib/mosquitto
+mkdir -p /var/log/mosquitto /var/lib/mosquitto /etc/mosquitto/certs
 chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
+
+# ── Certificats TLS : CA + serveur ──────────────────────────
+openssl genrsa -out /etc/mosquitto/certs/ca.key 2048 2>/dev/null
+openssl req -new -x509 -days 365 -nodes \
+  -key /etc/mosquitto/certs/ca.key \
+  -out /etc/mosquitto/certs/ca.crt \
+  -subj "/C=FR/ST=IDF/L=Paris/O=IoT-Lab/CN=IoT-CA" 2>/dev/null
+openssl genrsa -out /etc/mosquitto/certs/server.key 2048 2>/dev/null
+openssl req -new -key /etc/mosquitto/certs/server.key \
+  -out /etc/mosquitto/certs/server.csr \
+  -subj "/C=FR/ST=IDF/L=Paris/O=IoT-Lab/CN=mqtt-gateway" 2>/dev/null
+openssl x509 -req -days 365 \
+  -in /etc/mosquitto/certs/server.csr \
+  -CA /etc/mosquitto/certs/ca.crt \
+  -CAkey /etc/mosquitto/certs/ca.key \
+  -CAcreateserial \
+  -out /etc/mosquitto/certs/server.crt 2>/dev/null
+chmod 600 /etc/mosquitto/certs/server.key /etc/mosquitto/certs/ca.key
+chown -R mosquitto:mosquitto /etc/mosquitto/certs/
+
+# ── Fichier de mots de passe MQTT ───────────────────────────
+mosquitto_passwd -b -c /etc/mosquitto/passwd sensor   Sensor2024!
+mosquitto_passwd -b    /etc/mosquitto/passwd ingestion Ingestion2024!
+mosquitto_passwd -b    /etc/mosquitto/passwd dashboard Dashboard2024!
+chmod 640 /etc/mosquitto/passwd
+chown root:mosquitto /etc/mosquitto/passwd
+
+# ── ACL : politique d'acces minimale par topic ───────────────
+cat > /etc/mosquitto/acl << 'ACLEOF'
+# Capteurs IoT : publication uniquement sur leurs topics
+user sensor
+topic write sensors/temperature
+topic write devices/+/telemetry
+
+# Ingestion : lecture de tous les topics
+user ingestion
+topic read #
+
+# Dashboard/clients : lecture uniquement
+user dashboard
+topic read sensors/temperature
+topic read devices/+/telemetry
+ACLEOF
+chmod 640 /etc/mosquitto/acl
+chown root:mosquitto /etc/mosquitto/acl
+
+# ── Configuration Mosquitto : 1883 (auth) + 8883 (TLS+auth) ─
 cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
 pid_file /run/mosquitto/mosquitto.pid
 persistence true
 persistence_location /var/lib/mosquitto/
 log_dest file /var/log/mosquitto/mosquitto.log
+log_type all
 
+# Port MQTT plaintext (reseau interne + bridge)
 listener 1883 0.0.0.0
-allow_anonymous true
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+max_connections 500
+
+# Port MQTT over TLS (clients externes — production)
+listener 8883 0.0.0.0
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+require_certificate false
 max_connections 500
 MQTTCONF
 rm -f /etc/mosquitto/conf.d/*.conf
-mkdir -p /etc/mosquitto/certs
-openssl req -new -x509 -days 365 -nodes \
-  -out /etc/mosquitto/certs/server.crt \
-  -keyout /etc/mosquitto/certs/server.key \
-  -subj "/C=FR/ST=IDF/L=Paris/O=IoT-Lab/CN=mqtt-gateway" 2>/dev/null || true
-chmod 600 /etc/mosquitto/certs/server.key
-chown mosquitto:mosquitto /etc/mosquitto/certs/ -R
 cat > /usr/local/bin/configure_bridge.sh << 'BRIDGESCRIPT'
 #!/bin/bash
 INGESTION_IP="$1"
@@ -130,6 +195,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 while running:
     try:
         client = mqtt.Client(client_id=f"simulator-{SENSOR_ID}-{int(time.time())}")
+        client.username_pw_set(os.getenv('MQTT_USER', 'sensor'), os.getenv('MQTT_PASS', 'Sensor2024!'))
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
         client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
@@ -165,6 +231,8 @@ Environment=MQTT_BROKER=127.0.0.1
 Environment=MQTT_PORT=1883
 Environment=MQTT_TOPIC=sensors/temperature
 Environment=SENSOR_ID=temp-sensor-${INSTANCE_ID}
+Environment=MQTT_USER=sensor
+Environment=MQTT_PASS=Sensor2024!
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -201,7 +269,7 @@ chmod 755 /var/log/snort
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
 [ -z "$MAIN_IFACE" ] && MAIN_IFACE="ens5"
 cat > /etc/snort/snort.conf << SNORTCONF
-var HOME_NET 10.0.0.0/16
+var HOME_NET 10.1.0.0/16
 var EXTERNAL_NET !\$HOME_NET
 var MQTT_PORTS [1883,8883]
 var RULE_PATH /etc/snort/rules
@@ -262,11 +330,12 @@ apt-get install -y python3 python3-pip mosquitto mosquitto-clients amazon-cloudw
 wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
 dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
-pip3 install paho-mqtt
+pip3 install paho-mqtt boto3
 # Stopper mosquitto avant de reecrire la config (il demarre auto apres install)
 systemctl stop mosquitto || true
 mkdir -p /var/log/mosquitto /var/lib/mosquitto
 chown mosquitto:mosquitto /var/log/mosquitto /var/lib/mosquitto
+# Ingestion mosquitto : anonyme OK (reseau prive protege par SG/NACL)
 cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
 pid_file /run/mosquitto/mosquitto.pid
 persistence true
@@ -284,59 +353,119 @@ systemctl restart mosquitto
 sleep 2
 systemctl is-active mosquitto && echo "[OK] Mosquitto actif (ingestion)" || echo "[ERREUR] Mosquitto non demarre (ingestion)"
 mkdir -p /opt/ingestion /var/log/ingestion
-cat > /opt/ingestion/subscriber.py << 'PYEOF'
+# Script ingest_mqtt.py : se connecte aux 2 brokers GW, ecrit en NDJSON (telemetry.ndjson)
+cat > /opt/ingestion/ingest_mqtt.py << 'PYEOF'
 #!/usr/bin/env python3
+"""
+ingest_mqtt.py - Consumer MQTT IoT
+  - Decouvre les IPs des GW via SSM Parameter Store
+  - Se connecte aux deux brokers en parallele avec le compte 'ingestion'
+  - Reçoit des JSON et ecrit en NDJSON (une ligne par message) dans telemetry.ndjson
+"""
 import paho.mqtt.client as mqtt
-import logging, json, os, signal, sys, time
+import json, os, sys, time, signal, threading, logging
 from datetime import datetime, timezone
-BROKER_HOST = os.getenv('MQTT_BROKER_HOST', '127.0.0.1')
-BROKER_PORT = int(os.getenv('MQTT_BROKER_PORT', '1883'))
-LOG_FILE    = os.getenv('LOG_FILE', '/var/log/ingestion/mqtt.log')
+
+REGION       = 'us-east-1'
+PROJECT      = 'iot-mqtt'
+MQTT_USER    = 'ingestion'
+MQTT_PASS    = 'Ingestion2024!'
+TOPIC        = '#'
+NDJSON_FILE  = '/opt/ingestion/telemetry.ndjson'
+LOG_FILE     = '/var/log/ingestion/mqtt.log'
+
+os.makedirs(os.path.dirname(NDJSON_FILE), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger('ingestion')
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        logger.info(f"Connecte au broker {BROKER_HOST}:{BROKER_PORT}")
-        client.subscribe('#', qos=1)
-def on_message(client, userdata, msg):
-    try:
-        payload = msg.payload.decode('utf-8', errors='replace')
-        logger.info(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "topic": msg.topic, "payload": payload[:200]}))
-    except Exception as e:
-        logger.error(f"Erreur: {e}")
-def on_disconnect(client, userdata, rc):
-    if rc != 0: logger.warning(f"Deconnexion inattendue rc={rc}")
-signal.signal(signal.SIGTERM, lambda s,f: sys.exit(0))
-client = mqtt.Client(client_id='ingestion-001', clean_session=False)
-client.on_connect = on_connect
-client.on_message = on_message
-client.on_disconnect = on_disconnect
-client.reconnect_delay_set(min_delay=1, max_delay=30)
-logger.info("=== Demarrage service ingestion MQTT ===")
-while True:
-    try:
-        client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
-        client.loop_forever()
-    except Exception as e:
-        logger.warning(f"Retry dans 10s: {e}")
-        time.sleep(10)
+file_lock = threading.Lock()
+
+def get_broker_ips():
+    """Recupere les IPs des GW depuis SSM Parameter Store avec retry."""
+    import boto3
+    ssm = boto3.client('ssm', region_name=REGION)
+    logger.info("Recherche des IPs GW dans SSM Parameter Store...")
+    while True:
+        try:
+            gw1 = ssm.get_parameter(Name=f'/{PROJECT}/gw1-private-ip')['Parameter']['Value']
+            gw2 = ssm.get_parameter(Name=f'/{PROJECT}/gw2-private-ip')['Parameter']['Value']
+            logger.info(f"GW1={gw1}, GW2={gw2}")
+            return gw1, gw2
+        except Exception as e:
+            logger.warning(f"SSM non disponible, retry 30s: {e}")
+            time.sleep(30)
+
+def make_client(broker_id, broker_host):
+    def on_connect(client, userdata, flags, rc):
+        codes = {0:"OK",1:"Protocole",2:"ID",3:"Serveur",4:"User/Pass",5:"Refuse"}
+        if rc == 0:
+            logger.info(f"[{broker_id}] Connecte a {broker_host}:1883")
+            client.subscribe(TOPIC, qos=1)
+        else:
+            logger.error(f"[{broker_id}] Echec connexion: {codes.get(rc,rc)}")
+
+    def on_message(client, userdata, msg):
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            try:
+                payload_data = json.loads(msg.payload.decode('utf-8'))
+            except Exception:
+                payload_data = msg.payload.decode('utf-8', errors='replace')
+            record = {"ts": ts, "broker": broker_id, "topic": msg.topic, "payload": payload_data}
+            line = json.dumps(record, ensure_ascii=False)
+            with file_lock:
+                with open(NDJSON_FILE, 'a') as f:
+                    f.write(line + '\n')
+            logger.info(f"[{broker_id}] {msg.topic} -> {str(payload_data)[:80]}")
+        except Exception as e:
+            logger.error(f"[{broker_id}] on_message error: {e}")
+
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            logger.warning(f"[{broker_id}] Deconnexion inattendue rc={rc}")
+
+    c = mqtt.Client(client_id=f'ingestion-{broker_id}', clean_session=False)
+    c.username_pw_set(MQTT_USER, MQTT_PASS)
+    c.on_connect    = on_connect
+    c.on_message    = on_message
+    c.on_disconnect = on_disconnect
+    c.reconnect_delay_set(min_delay=5, max_delay=60)
+    return c
+
+def connect_loop(broker_id, broker_host):
+    while True:
+        try:
+            client = make_client(broker_id, broker_host)
+            client.connect(broker_host, 1883, keepalive=60)
+            client.loop_forever()
+        except Exception as e:
+            logger.warning(f"[{broker_id}] {e} — retry 10s")
+            time.sleep(10)
+
+signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+logger.info("=== Demarrage service ingestion MQTT (NDJSON) ===")
+gw1_ip, gw2_ip = get_broker_ips()
+
+t1 = threading.Thread(target=connect_loop, args=('gw1', gw1_ip), daemon=True)
+t2 = threading.Thread(target=connect_loop, args=('gw2', gw2_ip), daemon=True)
+t1.start()
+t2.start()
+logger.info(f"Connecte aux deux brokers : GW1={gw1_ip} | GW2={gw2_ip}")
+t1.join()
+t2.join()
 PYEOF
-chmod +x /opt/ingestion/subscriber.py
+chmod +x /opt/ingestion/ingest_mqtt.py
 cat > /etc/systemd/system/ingestion.service << 'SVCEOF'
 [Unit]
-Description=IoT MQTT Ingestion Service
+Description=IoT MQTT Ingestion Service (NDJSON)
 After=network.target mosquitto.service
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/ingestion/subscriber.py
-Environment=MQTT_BROKER_HOST=127.0.0.1
-Environment=MQTT_BROKER_PORT=1883
-Environment=LOG_FILE=/var/log/ingestion/mqtt.log
+ExecStart=/usr/bin/python3 /opt/ingestion/ingest_mqtt.py
 Restart=always
-RestartSec=10
+RestartSec=15
 [Install]
 WantedBy=multi-user.target
 SVCEOF
@@ -355,7 +484,22 @@ hostnamectl set-hostname "ingestion-${INSTANCE_ID}"
 echo "Bootstrap Ingestion termine - $(date)" >> /var/log/bootstrap.log
 USERDATA_INGESTION_EOF
 
-chmod +x /tmp/userdata_mqtt_gw.sh /tmp/userdata_snort.sh /tmp/userdata_ingestion.sh
+cat > /tmp/userdata_bastion.sh << 'USERDATA_BASTION_EOF'
+#!/bin/bash
+set -x
+exec > /var/log/bootstrap.log 2>&1
+apt-get update -y
+apt-get install -y curl wget jq net-tools nmap
+# SSM Agent
+wget -q https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb && rm -f amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+hostnamectl set-hostname "bastion-${INSTANCE_ID}"
+echo "Bootstrap Bastion termine - $(date)" >> /var/log/bootstrap.log
+USERDATA_BASTION_EOF
+
+chmod +x /tmp/userdata_mqtt_gw.sh /tmp/userdata_snort.sh /tmp/userdata_ingestion.sh /tmp/userdata_bastion.sh
 
 # ── Script simulateur de capteur temperature ──────────────────
 cat > /tmp/sensor_simulator.py << 'SIMULATOR_EOF'
@@ -581,6 +725,26 @@ aws ec2 modify-subnet-attribute \
   --map-public-ip-on-launch > /dev/null
 log "Auto-assign public IP active sur subnet DMZ"
 
+# Second subnet DMZ dans us-east-1b pour GW2 (haute disponibilite multi-AZ)
+SUBNET_DMZ_B=$(aws ec2 create-subnet \
+  --region "$REGION" \
+  --vpc-id "$VPC_ID" \
+  --cidr-block "$DMZ_CIDR_B" \
+  --availability-zone "$AZ_B" \
+  --tag-specifications "ResourceType=subnet,Tags=[
+    {Key=Name,Value=${PROJECT}-subnet-dmz-b},
+    {Key=Project,Value=${PROJECT}},
+    {Key=Type,Value=public},
+    {Key=ManagedBy,Value=aws-cli}
+  ]" \
+  --query 'Subnet.SubnetId' --output text)
+aws ec2 modify-subnet-attribute --region "$REGION" --subnet-id "$SUBNET_DMZ_B" \
+  --map-public-ip-on-launch > /dev/null
+aws ec2 associate-route-table --region "$REGION" \
+  --route-table-id "$RT_DMZ" --subnet-id "$SUBNET_DMZ_B" > /dev/null
+save "SUBNET_DMZ_B" "$SUBNET_DMZ_B"
+log "Subnet DMZ-B  : $SUBNET_DMZ_B ($DMZ_CIDR_B) [AZ: $AZ_B]"
+
 SUBNET_PRIVATE=$(aws ec2 create-subnet \
   --region "$REGION" \
   --vpc-id "$VPC_ID" \
@@ -741,12 +905,31 @@ aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_SNOR
 save "SG_SNORT" "$SG_SNORT"
 log "SG Snort IDS : $SG_SNORT"
 
+# SG Bastion (acces SSH admin depuis internet)
+SG_BASTION=$(aws ec2 create-security-group \
+  --region "$REGION" \
+  --vpc-id "$VPC_ID" \
+  --group-name "${PROJECT}-sg-bastion" \
+  --description "Bastion SSH - acces admin" \
+  --tag-specifications "ResourceType=security-group,Tags=[
+    {Key=Name,Value=${PROJECT}-sg-bastion},
+    {Key=Project,Value=${PROJECT}},
+    {Key=ManagedBy,Value=aws-cli}
+  ]" \
+  --query 'GroupId' --output text)
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_BASTION" \
+  --protocol tcp --port 22 --cidr 0.0.0.0/0 > /dev/null
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_BASTION" \
+  --protocol icmp --port -1 --cidr "$VPC_CIDR" > /dev/null
+save "SG_BASTION" "$SG_BASTION"
+log "SG Bastion   : $SG_BASTION"
+
 # SG Ingestion (prive)
 SG_INGESTION=$(aws ec2 create-security-group \
   --region "$REGION" \
   --vpc-id "$VPC_ID" \
   --group-name "${PROJECT}-sg-ingestion" \
-  --description "Ingestion backend - MQTT depuis DMZ uniquement" \
+  --description "Ingestion backend - MQTT depuis DMZ, SSH depuis bastion" \
   --tag-specifications "ResourceType=security-group,Tags=[
     {Key=Name,Value=${PROJECT}-sg-ingestion},
     {Key=Project,Value=${PROJECT}},
@@ -757,6 +940,11 @@ SG_INGESTION=$(aws ec2 create-security-group \
 # MQTT 1883 depuis DMZ seulement
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_INGESTION" \
   --protocol tcp --port 1883 --cidr "$DMZ_CIDR" > /dev/null
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_INGESTION" \
+  --protocol tcp --port 1883 --cidr "$DMZ_CIDR_B" > /dev/null
+# SSH uniquement depuis le bastion
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_INGESTION" \
+  --protocol tcp --port 22 --source-group "$SG_BASTION" > /dev/null
 # ICMP VPC
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_INGESTION" \
   --protocol icmp --port -1 --cidr "$VPC_CIDR" > /dev/null
@@ -937,11 +1125,17 @@ INST_GW1=$(launch_instance "mqtt-gw1" "$SUBNET_DMZ" "$SG_MQTT_GW" "$INSTANCE_TYP
 save "INST_GW1" "$INST_GW1"
 log "mqtt-gw1 : $INST_GW1"
 
-log "Lancement mqtt-gw2..."
-INST_GW2=$(launch_instance "mqtt-gw2" "$SUBNET_DMZ" "$SG_MQTT_GW" "$INSTANCE_TYPE_GW" \
+log "Lancement mqtt-gw2... (AZ: $AZ_B pour haute disponibilite)"
+INST_GW2=$(launch_instance "mqtt-gw2" "$SUBNET_DMZ_B" "$SG_MQTT_GW" "$INSTANCE_TYPE_GW" \
   "userdata_mqtt_gw.sh" "mqtt-gateway")
 save "INST_GW2" "$INST_GW2"
 log "mqtt-gw2 : $INST_GW2"
+
+log "Lancement bastion (DMZ - SSH admin)..."
+INST_BASTION=$(launch_instance "bastion" "$SUBNET_DMZ" "$SG_BASTION" "$INSTANCE_TYPE_BASTION" \
+  "userdata_bastion.sh" "bastion")
+save "INST_BASTION" "$INST_BASTION"
+log "bastion : $INST_BASTION"
 
 log "Lancement snort-ids..."
 INST_SNORT=$(launch_instance "snort-ids" "$SUBNET_DMZ" "$SG_SNORT" "$INSTANCE_TYPE_SNORT" \
@@ -957,7 +1151,7 @@ log "ingestion : $INST_INGESTION"
 
 log "Attente etat 'running' pour toutes les instances..."
 aws ec2 wait instance-running --region "$REGION" \
-  --instance-ids "$INST_GW1" "$INST_GW2" "$INST_SNORT" "$INST_INGESTION"
+  --instance-ids "$INST_GW1" "$INST_GW2" "$INST_SNORT" "$INST_INGESTION" "$INST_BASTION"
 log "Toutes les instances sont en etat running"
 
 # Recuperer les IPs privees
@@ -965,18 +1159,36 @@ get_private_ip() {
   aws ec2 describe-instances --region "$REGION" --instance-ids "$1" \
     --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text
 }
+get_public_ip() {
+  aws ec2 describe-instances --region "$REGION" --instance-ids "$1" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+}
 
 IP_GW1=$(get_private_ip "$INST_GW1")
 IP_GW2=$(get_private_ip "$INST_GW2")
 IP_SNORT=$(get_private_ip "$INST_SNORT")
 IP_INGESTION=$(get_private_ip "$INST_INGESTION")
+IP_BASTION_PUB=$(get_public_ip "$INST_BASTION")
 
 save "IP_GW1" "$IP_GW1"
 save "IP_GW2" "$IP_GW2"
 save "IP_SNORT" "$IP_SNORT"
 save "IP_INGESTION" "$IP_INGESTION"
+save "IP_BASTION_PUB" "$IP_BASTION_PUB"
 
 log "IPs privees : GW1=$IP_GW1 | GW2=$IP_GW2 | Snort=$IP_SNORT | Ingestion=$IP_INGESTION"
+log "Bastion IP publique : $IP_BASTION_PUB"
+
+# Publier les IPs des GW dans SSM Parameter Store
+# Le subscriber ingestion les recupere au demarrage pour se connecter aux 2 brokers
+log "Publication IPs GW dans SSM Parameter Store..."
+aws ssm put-parameter --region "$REGION" \
+  --name "/${PROJECT}/gw1-private-ip" --value "$IP_GW1" \
+  --type String --overwrite > /dev/null
+aws ssm put-parameter --region "$REGION" \
+  --name "/${PROJECT}/gw2-private-ip" --value "$IP_GW2" \
+  --type String --overwrite > /dev/null
+log "SSM params publies : /${PROJECT}/gw1-private-ip=$IP_GW1 | /${PROJECT}/gw2-private-ip=$IP_GW2"
 
 # ════════════════════════════════════════════════════════════
 section "10/12 - NETWORK LOAD BALANCER"
@@ -987,7 +1199,7 @@ NLB_ARN=$(aws elbv2 create-load-balancer \
   --name "${PROJECT}-nlb" \
   --type network \
   --scheme internet-facing \
-  --subnets "$SUBNET_DMZ" \
+  --subnets "$SUBNET_DMZ" "$SUBNET_DMZ_B" \
   --tags \
     Key=Name,Value="${PROJECT}-nlb" \
     Key=Project,Value="$PROJECT" \
@@ -1238,46 +1450,59 @@ echo -e "${BOLD}${GREEN}╔═════════════════�
 echo -e "${BOLD}${GREEN}║         DEPLOIEMENT IOT MQTT - TERMINE                  ║${NC}"
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${BOLD}VPC${NC}             : $VPC_ID ($VPC_CIDR)"
-echo -e "  ${BOLD}Subnet DMZ${NC}      : $SUBNET_DMZ ($DMZ_CIDR)"
-echo -e "  ${BOLD}Subnet Private${NC}  : $SUBNET_PRIVATE ($PRIVATE_CIDR)"
+echo -e "  ${BOLD}VPC${NC}              : $VPC_ID ($VPC_CIDR)"
+echo -e "  ${BOLD}Subnet DMZ-A${NC}     : $SUBNET_DMZ   ($DMZ_CIDR)   [AZ: $AZ]"
+echo -e "  ${BOLD}Subnet DMZ-B${NC}     : $SUBNET_DMZ_B ($DMZ_CIDR_B) [AZ: $AZ_B]"
+echo -e "  ${BOLD}Subnet Private${NC}   : $SUBNET_PRIVATE ($PRIVATE_CIDR)"
 echo ""
-echo -e "  ${BOLD}mqtt-gw1${NC}        : $INST_GW1 | IP: $IP_GW1"
-echo -e "  ${BOLD}mqtt-gw2${NC}        : $INST_GW2 | IP: $IP_GW2"
-echo -e "  ${BOLD}snort-ids${NC}       : $INST_SNORT  | IP: $IP_SNORT"
-echo -e "  ${BOLD}ingestion${NC}       : $INST_INGESTION | IP: $IP_INGESTION"
+echo -e "  ${BOLD}mqtt-gw1${NC}         : $INST_GW1 | IP: $IP_GW1  [AZ: $AZ]"
+echo -e "  ${BOLD}mqtt-gw2${NC}         : $INST_GW2 | IP: $IP_GW2  [AZ: $AZ_B]"
+echo -e "  ${BOLD}snort-ids${NC}        : $INST_SNORT | IP: $IP_SNORT"
+echo -e "  ${BOLD}ingestion${NC}        : $INST_INGESTION | IP: $IP_INGESTION"
+echo -e "  ${BOLD}bastion${NC}          : $INST_BASTION | IP publique: $IP_BASTION_PUB"
 echo ""
-echo -e "  ${BOLD}NLB DNS${NC}         : $NLB_DNS"
-echo -e "  ${BOLD}MQTT 8883${NC}       : $NLB_DNS:8883 (TLS - production)"
-echo -e "  ${BOLD}MQTT 1883${NC}       : $NLB_DNS:1883 (plaintext - Android/demo)"
+echo -e "  ${BOLD}NLB DNS${NC}          : $NLB_DNS"
+echo -e "  ${BOLD}MQTT 8883 (TLS)${NC}  : $NLB_DNS:8883"
+echo -e "  ${BOLD}MQTT 1883${NC}        : $NLB_DNS:1883"
 echo ""
 echo -e "${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${YELLOW}║  APP ANDROID - Configuration MQTT                       ║${NC}"
+echo -e "${BOLD}${YELLOW}║  CREDENTIALS MQTT                                       ║${NC}"
 echo -e "${BOLD}${YELLOW}╠══════════════════════════════════════════════════════════╣${NC}"
-echo -e "${BOLD}${YELLOW}║  Broker Host : $NLB_DNS${NC}"
-echo -e "${BOLD}${YELLOW}║  Port        : 1883                                     ║${NC}"
-echo -e "${BOLD}${YELLOW}║  Topic       : sensors/temperature                      ║${NC}"
-echo -e "${BOLD}${YELLOW}║  (Renseigner dans l'app ou via le bouton Parametres)    ║${NC}"
+echo -e "${BOLD}${YELLOW}║  sensor    / $MQTT_PASS_SENSOR   (publish sensors/#)   ║${NC}"
+echo -e "${BOLD}${YELLOW}║  ingestion / $MQTT_PASS_INGESTION  (subscribe #)       ║${NC}"
+echo -e "${BOLD}${YELLOW}║  dashboard / $MQTT_PASS_DASHBOARD  (subscribe sensors/#)║${NC}"
 echo -e "${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${BOLD}Simulateur${NC}      : systemctl status iot-simulator (sur ingestion)"
-echo -e "  ${BOLD}Logs sim${NC}        : journalctl -u iot-simulator -f (sur ingestion)"
+echo -e "${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${YELLOW}║  APP ANDROID / WEB DASHBOARD                            ║${NC}"
+echo -e "${BOLD}${YELLOW}╠══════════════════════════════════════════════════════════╣${NC}"
+echo -e "${BOLD}${YELLOW}║  Broker   : $NLB_DNS${NC}"
+echo -e "${BOLD}${YELLOW}║  Port TLS : 8883  |  Port plain : 1883                  ║${NC}"
+echo -e "${BOLD}${YELLOW}║  User     : dashboard  |  Pass : $MQTT_PASS_DASHBOARD   ║${NC}"
+echo -e "${BOLD}${YELLOW}║  Topic    : sensors/temperature                         ║${NC}"
+echo -e "${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${BOLD}Acces instances${NC} (SSM) :"
+echo -e "  ${BOLD}Tests validation prof${NC} :"
+echo -e "    # Test Auth (avec creds valides)"
+echo -e "    mosquitto_pub -h $NLB_DNS -p 1883 -u sensor -P '$MQTT_PASS_SENSOR' -t sensors/temperature -m '{\"value\":22.5}'"
+echo -e "    # Test Auth (creds invalides → doit etre refuse)"
+echo -e "    mosquitto_pub -h $NLB_DNS -p 1883 -u bad -P 'wrong' -t sensors/temperature -m 'test'"
+echo -e "    # Test TLS (port 8883)"
+echo -e "    mosquitto_pub -h $NLB_DNS -p 8883 --insecure -u sensor -P '$MQTT_PASS_SENSOR' -t sensors/temperature -m '{\"value\":22.5}'"
+echo -e "    # Test ACL (topic non autorise → refuse)"
+echo -e "    mosquitto_pub -h $NLB_DNS -p 1883 -u dashboard -P '$MQTT_PASS_DASHBOARD' -t sensors/temperature -m 'hack'"
+echo -e "    # Ingestion NDJSON"
+echo -e "    ssh -i ~/TPIOT/labsuser.pem ubuntu@$IP_BASTION_PUB 'tail -f /opt/ingestion/telemetry.ndjson'"
+echo ""
+echo -e "  ${BOLD}Bastion${NC} (acces serveur prive) :"
+echo -e "    ssh -i ~/TPIOT/labsuser.pem ubuntu@$IP_BASTION_PUB"
+echo -e "    ssh -J ubuntu@$IP_BASTION_PUB ubuntu@$IP_INGESTION"
+echo ""
+echo -e "  ${BOLD}Acces SSM${NC} :"
 echo -e "    aws ssm start-session --target $INST_GW1 --region $REGION"
 echo -e "    aws ssm start-session --target $INST_GW2 --region $REGION"
-echo -e "    aws ssm start-session --target $INST_SNORT --region $REGION"
-echo -e "    aws ssm start-session --target $INST_INGESTION --region $REGION"
 echo ""
-echo -e "  ${BOLD}Test MQTT${NC} :"
-echo -e "    mosquitto_pub -h $NLB_DNS -p 8883 -t test/hello -m 'IoT message'"
-echo ""
-echo -e "  ${YELLOW}Note${NC}: Le bootstrap des instances prend 3-5 minutes."
-echo -e "  ${YELLOW}Note${NC}: Configure le bridge MQTT sur GW1/GW2 vers $IP_INGESTION"
-echo -e "    aws ssm start-session --target $INST_GW1 --region $REGION"
-echo -e "    sudo /usr/local/bin/configure_bridge.sh $IP_INGESTION"
-echo ""
-echo -e "  ${BOLD}State file${NC}      : $STATE_FILE"
+echo -e "  ${BOLD}State file${NC}       : $STATE_FILE"
 echo ""
 
 log "Deploiement termine avec succes !"
