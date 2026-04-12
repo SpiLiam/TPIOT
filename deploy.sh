@@ -1161,11 +1161,12 @@ log "Bastion IP publique : $IP_BASTION_PUB"
 log "Publication IPs GW dans SSM Parameter Store..."
 aws ssm put-parameter --region "$REGION" \
   --name "/${PROJECT}/gw1-private-ip" --value "$IP_GW1" \
-  --type String --overwrite > /dev/null
+  --type String --overwrite > /dev/null 2>&1 \
+  && log "SSM param publie : /${PROJECT}/gw1-private-ip=$IP_GW1" \
+  || warn "SSM put-parameter non supporte (Academy) — IPs dans infra_state.env"
 aws ssm put-parameter --region "$REGION" \
   --name "/${PROJECT}/gw2-private-ip" --value "$IP_GW2" \
-  --type String --overwrite > /dev/null
-log "SSM params publies : /${PROJECT}/gw1-private-ip=$IP_GW1 | /${PROJECT}/gw2-private-ip=$IP_GW2"
+  --type String --overwrite > /dev/null 2>&1 || true
 
 # ════════════════════════════════════════════════════════════
 section "10/12 - NETWORK LOAD BALANCER"
