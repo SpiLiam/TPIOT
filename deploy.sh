@@ -742,8 +742,6 @@ SUBNET_DMZ_B=$(aws ec2 create-subnet \
   --query 'Subnet.SubnetId' --output text)
 aws ec2 modify-subnet-attribute --region "$REGION" --subnet-id "$SUBNET_DMZ_B" \
   --map-public-ip-on-launch > /dev/null
-aws ec2 associate-route-table --region "$REGION" \
-  --route-table-id "$RT_DMZ" --subnet-id "$SUBNET_DMZ_B" > /dev/null
 save "SUBNET_DMZ_B" "$SUBNET_DMZ_B"
 log "Subnet DMZ-B  : $SUBNET_DMZ_B ($DMZ_CIDR_B) [AZ: $AZ_B]"
 
@@ -831,8 +829,11 @@ aws ec2 create-route --region "$REGION" --route-table-id "$RT_DMZ" \
   --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID" > /dev/null
 aws ec2 associate-route-table --region "$REGION" \
   --route-table-id "$RT_DMZ" --subnet-id "$SUBNET_DMZ" > /dev/null
+# Associer aussi le subnet DMZ-B (cree a l'etape 2, RT_DMZ disponible ici)
+aws ec2 associate-route-table --region "$REGION" \
+  --route-table-id "$RT_DMZ" --subnet-id "$SUBNET_DMZ_B" > /dev/null
 save "RT_DMZ" "$RT_DMZ"
-log "Route table DMZ : $RT_DMZ (0.0.0.0/0 -> IGW)"
+log "Route table DMZ : $RT_DMZ (0.0.0.0/0 -> IGW) [subnets: DMZ-A + DMZ-B]"
 
 # Route table Private -> NAT GW
 RT_PRIVATE=$(aws ec2 create-route-table \
