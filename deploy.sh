@@ -115,6 +115,8 @@ chmod 640 /etc/mosquitto/acl
 chown root:mosquitto /etc/mosquitto/acl
 
 # ── Configuration Mosquitto : 1883 (auth) + 8883 (TLS+auth) ─
+# NOTE: Mosquitto 2.x exige que les directives d'auth soient GLOBALES
+# (avant tout bloc listener), sinon duplicate password_file error
 cat > /etc/mosquitto/mosquitto.conf << 'MQTTCONF'
 pid_file /run/mosquitto/mosquitto.pid
 persistence true
@@ -122,18 +124,17 @@ persistence_location /var/lib/mosquitto/
 log_dest file /var/log/mosquitto/mosquitto.log
 log_type all
 
-# Port MQTT plaintext (reseau interne + bridge)
-listener 1883 0.0.0.0
+# Auth globale (doit etre avant les blocs listener en Mosquitto 2.x)
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 acl_file /etc/mosquitto/acl
+
+# Port MQTT plaintext (reseau interne + bridge)
+listener 1883 0.0.0.0
 max_connections 500
 
 # Port MQTT over TLS (clients externes — production)
 listener 8883 0.0.0.0
-allow_anonymous false
-password_file /etc/mosquitto/passwd
-acl_file /etc/mosquitto/acl
 cafile /etc/mosquitto/certs/ca.crt
 certfile /etc/mosquitto/certs/server.crt
 keyfile /etc/mosquitto/certs/server.key
@@ -1053,49 +1054,13 @@ log "NACL Private : $NACL_PRIVATE"
 section "8/12 - IAM ROLE (SSM + CloudWatch)"
 # ════════════════════════════════════════════════════════════
 
-ROLE_NAME="${PROJECT}-ec2-role"
-PROFILE_NAME="${PROJECT}-ec2-profile"
+# AWS Academy : le role IAM custom ne peut pas etre cree (politique voclabs).
+# On utilise directement le LabInstanceProfile pre-existant qui inclut
+# AmazonSSMManagedInstanceCore + CloudWatchAgentServerPolicy.
+PROFILE_NAME="LabInstanceProfile"
 
-# Trust policy
-cat > /tmp/trust-ec2.json << 'TRUST'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"},
-    "Action": "sts:AssumeRole"
-  }]
-}
-TRUST
-
-# Creer le role (ignore si existe)
-aws iam create-role \
-  --role-name "$ROLE_NAME" \
-  --assume-role-policy-document file:///tmp/trust-ec2.json \
-  --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=aws-cli \
-  2>/dev/null && log "Role IAM cree : $ROLE_NAME" || warn "Role $ROLE_NAME existe deja, on continue"
-
-# Attacher les policies
-for POLICY in \
-  "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
-  "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"; do
-  aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY" 2>/dev/null || true
-done
-
-# Instance profile
-aws iam create-instance-profile \
-  --instance-profile-name "$PROFILE_NAME" 2>/dev/null \
-  && log "Instance profile cree : $PROFILE_NAME" \
-  || warn "Instance profile $PROFILE_NAME existe deja"
-
-aws iam add-role-to-instance-profile \
-  --instance-profile-name "$PROFILE_NAME" \
-  --role-name "$ROLE_NAME" 2>/dev/null || true
-
-save "IAM_ROLE" "$ROLE_NAME"
 save "IAM_PROFILE" "$PROFILE_NAME"
-log "Attente propagation IAM (20s)..."
-sleep 20
+log "Utilisation du profil IAM Academy pre-existant : $PROFILE_NAME"
 
 # ════════════════════════════════════════════════════════════
 section "9/12 - INSTANCES EC2"
