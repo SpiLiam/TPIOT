@@ -5,6 +5,10 @@
 # Region : us-east-1
 # Usage  : bash deploy.sh
 # ============================================================
+# Desactiver la conversion automatique de chemins POSIX par Git Bash sur Windows
+# (evite /iot-mqtt/foo -> C:/Program Files/Git/iot-mqtt/foo)
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 
 set -euo pipefail
 
@@ -1228,6 +1232,38 @@ LISTENER_ARN=$(aws elbv2 create-listener \
   --query 'Listeners[0].ListenerArn' --output text)
 save "LISTENER_ARN" "$LISTENER_ARN"
 log "Listener TCP:8883 cree"
+
+# Target Group TCP:1883 (MQTT plaintext — dashboard + ingestion)
+TG1883_ARN=$(aws elbv2 create-target-group \
+  --region "$REGION" \
+  --name "${PROJECT}-tg-mqtt-1883" \
+  --protocol TCP \
+  --port 1883 \
+  --vpc-id "$VPC_ID" \
+  --health-check-protocol TCP \
+  --health-check-port 1883 \
+  --health-check-interval-seconds 30 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 2 \
+  --tags \
+    Key=Name,Value="${PROJECT}-tg-mqtt-1883" \
+    Key=Project,Value="$PROJECT" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+save "TG1883_ARN" "$TG1883_ARN"
+
+aws elbv2 register-targets --region "$REGION" \
+  --target-group-arn "$TG1883_ARN" \
+  --targets Id="$INST_GW1",Port=1883 Id="$INST_GW2",Port=1883
+
+aws elbv2 create-listener \
+  --region "$REGION" \
+  --load-balancer-arn "$NLB_ARN" \
+  --protocol TCP \
+  --port 1883 \
+  --default-actions Type=forward,TargetGroupArn="$TG1883_ARN" \
+  --tags Key=Name,Value="${PROJECT}-listener-mqtt-1883" Key=Project,Value="$PROJECT" \
+  --query 'Listeners[0].ListenerArn' --output text > /dev/null
+log "Listener TCP:1883 cree"
 
 # ════════════════════════════════════════════════════════════
 section "11/12 - VPC TRAFFIC MIRRORING (Snort IDS)"
