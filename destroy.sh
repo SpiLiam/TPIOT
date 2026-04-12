@@ -243,10 +243,30 @@ purge_vpc() {
 
   # ── Security Groups (non-default) ────────────────────────
   sleep 5
-  for SG in $(aws ec2 describe-security-groups --region "$REGION" \
+  SG_IDS=$(aws ec2 describe-security-groups --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC" \
     --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
-    --output text 2>/dev/null || true); do
+    --output text 2>/dev/null || true)
+  # Revoquer d'abord toutes les regles qui referencent un autre SG du meme VPC
+  # (dependances croisees bloquent la suppression)
+  for SG in $SG_IDS; do
+    RULES=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$SG" \
+      --query 'SecurityGroups[0].IpPermissions[?UserIdGroupPairs!=`[]`]' \
+      --output json 2>/dev/null || echo "[]")
+    if [ "$RULES" != "[]" ] && [ -n "$RULES" ]; then
+      aws ec2 revoke-security-group-ingress --region "$REGION" \
+        --group-id "$SG" --ip-permissions "$RULES" 2>/dev/null || true
+    fi
+    EGRESS=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$SG" \
+      --query 'SecurityGroups[0].IpPermissionsEgress[?UserIdGroupPairs!=`[]`]' \
+      --output json 2>/dev/null || echo "[]")
+    if [ "$EGRESS" != "[]" ] && [ -n "$EGRESS" ]; then
+      aws ec2 revoke-security-group-egress --region "$REGION" \
+        --group-id "$SG" --ip-permissions "$EGRESS" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for SG in $SG_IDS; do
     aws ec2 delete-security-group --region "$REGION" \
       --group-id "$SG" 2>/dev/null || true
   done
