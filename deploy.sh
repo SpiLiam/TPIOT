@@ -45,7 +45,8 @@ MQTT_PASS_INGESTION="Ingestion2024!"
 MQTT_PASS_DASHBOARD="Dashboard2024!"
 
 STATE_FILE="./infra_state.env"
-SCRIPT_DIR="/tmp"
+SCRIPT_DIR="$(pwd)/deploy_scripts"
+mkdir -p "$SCRIPT_DIR"
 
 # ─── SCRIPTS EMBARQUES (ecrits dans /tmp au lancement) ───────
 write_userdata_scripts() {
